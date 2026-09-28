@@ -181,6 +181,30 @@ def provision_student(client: TestClient) -> tuple[dict[str, object], dict[str, 
     }
 
 
+def test_legacy_local_email_can_log_in() -> None:
+    password = "legacy-test-password"
+    user = User(
+        email="admin@smartgate.local",
+        full_name="Legacy Admin",
+        password_hash=PasswordHash.recommended().hash(password),
+        role="admin",
+    )
+    db = SessionLocal()
+    db.add(user)
+    db.commit()
+    email = user.email
+    db.close()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/login",
+            json={"email": email, "password": password},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == email
+
+
 def test_department_qr_verifies_matching_student_to_backend_profile() -> None:
     with TestClient(app) as client:
         auth, headers, onboarding = provision_student(client)
@@ -482,6 +506,14 @@ def test_student_can_submit_late_request_and_advisor_can_approve() -> None:
         _auth, student_headers, onboarding = provision_student(client)
         student_id = onboarding["student"]["id"]
 
+        qr_verification = client.post(
+            "/students/verify-department-qr",
+            headers=student_headers,
+            json={"qr_value": onboarding["department_qr"]["qr_payload"]},
+        )
+        assert qr_verification.status_code == 200
+        assert qr_verification.json()["id"] == student_id
+
         request_response = client.post(
             "/late-requests",
             headers=student_headers,
@@ -494,6 +526,19 @@ def test_student_can_submit_late_request_and_advisor_can_approve() -> None:
         assert payload["status"] == "pending_approval"
         assert payload["hod_user_id"] == onboarding["hod"]["id"]
         assert payload["advisor_user_id"] == onboarding["advisor"]["id"]
+
+        student_status = client.get(
+            f"/students/late-requests/{payload['id']}",
+            headers=student_headers,
+        )
+        assert student_status.status_code == 200
+        assert student_status.json()["status"] == "pending_approval"
+        assert student_status.json()["advisor_name"] == "Test Advisor"
+        assert student_status.json()["hod_name"] == "Test HOD"
+        assert client.get(
+            f"/students/late-requests/{payload['id']}",
+            headers=onboarding["advisor_headers"],
+        ).status_code == 403
 
         pending = client.get(
             "/staff/late-requests",
@@ -510,6 +555,15 @@ def test_student_can_submit_late_request_and_advisor_can_approve() -> None:
         assert approved.status_code == 200
         assert approved.json()["status"] == "approved"
 
+        decided_status = client.get(
+            f"/students/late-requests/{payload['id']}",
+            headers=student_headers,
+        )
+        assert decided_status.status_code == 200
+        assert decided_status.json()["approved_by_name"] == "Test Advisor"
+        assert decided_status.json()["approved_by_role"] == "advisor"
+        assert decided_status.json()["decision_note"] == "Approved for this session"
+
         duplicate = client.post(
             f"/staff/late-requests/{payload['id']}/approve",
             headers=onboarding["hod_headers"],
@@ -523,6 +577,132 @@ def test_student_can_submit_late_request_and_advisor_can_approve() -> None:
         assert permission.approved_by_user_id == onboarding["advisor"]["id"]
         assert permission.status == "approved"
         db.close()
+
+
+def test_late_request_history_is_scoped_for_student_staff_and_admin() -> None:
+    with TestClient(app) as client:
+        _auth, first_student_headers, onboarding = provision_student(client)
+        suffix = uuid.uuid4().hex[:8]
+        second_student = client.post(
+            "/admin/students",
+            headers=onboarding["admin_headers"],
+            json={
+                "email": f"history-{suffix}@example.edu",
+                "full_name": "History Student",
+                "password": "history-student-password",
+                "student_id": f"STU-HISTORY-{suffix}",
+                "register_number": f"REG-HISTORY-{suffix}",
+                "department_id": onboarding["department"]["id"],
+                "year": "II",
+                "section": "A",
+            },
+        )
+        assert second_student.status_code == 201
+        second_login = client.post(
+            "/auth/login",
+            json={"email": second_student.json()["email"], "password": "history-student-password"},
+        )
+        assert second_login.status_code == 200
+        second_student_headers = {"Authorization": f"Bearer {second_login.json()['access_token']}"}
+
+        first_request = client.post(
+            "/late-requests", headers=first_student_headers, json={"reason": "Bus delay"}
+        )
+        second_request = client.post(
+            "/late-requests", headers=second_student_headers, json={"reason": "Train delay"}
+        )
+        assert first_request.status_code == 201
+        assert second_request.status_code == 201
+
+        first_history = client.get("/students/late-requests", headers=first_student_headers)
+        second_history = client.get("/students/late-requests", headers=second_student_headers)
+        assert [item["id"] for item in first_history.json()] == [first_request.json()["id"]]
+        assert [item["id"] for item in second_history.json()] == [second_request.json()["id"]]
+        assert first_history.json()[0]["student_name"] == "Test Student"
+        assert client.get(
+            f"/students/late-requests/{second_request.json()['id']}",
+            headers=first_student_headers,
+        ).status_code == 404
+
+        advisor_history = client.get(
+            "/staff/late-requests/history", headers=onboarding["advisor_headers"]
+        )
+        hod_history = client.get(
+            "/staff/late-requests/history", headers=onboarding["hod_headers"]
+        )
+        admin_history = client.get(
+            "/admin/late-requests", headers=onboarding["admin_headers"]
+        )
+        assert {item["id"] for item in advisor_history.json()} == {
+            first_request.json()["id"], second_request.json()["id"]
+        }
+        assert {item["id"] for item in hod_history.json()} == {
+            first_request.json()["id"], second_request.json()["id"]
+        }
+        assert {item["id"] for item in admin_history.json()} == {
+            first_request.json()["id"], second_request.json()["id"]
+        }
+        assert all(item["department_code"] == "CCE" for item in admin_history.json())
+        assert client.get("/admin/late-requests", headers=first_student_headers).status_code == 403
+        assert client.get("/staff/late-requests/history", headers=first_student_headers).status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("role", "decision", "expected_status"),
+    [
+        ("advisor", "approve", "approved"),
+        ("hod", "approve", "approved"),
+        ("advisor", "reject", "rejected"),
+        ("hod", "reject", "rejected"),
+    ],
+)
+def test_assigned_staff_can_decide_request_once(
+    role: str,
+    decision: str,
+    expected_status: str,
+) -> None:
+    with TestClient(app) as client:
+        _auth, student_headers, onboarding = provision_student(client)
+        request_response = client.post(
+            "/late-requests",
+            headers=student_headers,
+            json={"reason": "Transit delay"},
+        )
+        request_id = request_response.json()["id"]
+        staff_headers = onboarding[f"{role}_headers"]
+
+        response = client.post(
+            f"/staff/late-requests/{request_id}/{decision}",
+            headers=staff_headers,
+            json={"decision_note": "Reviewed"},
+        )
+
+        assert request_response.status_code == 201
+        assert response.status_code == 200
+        assert response.json()["status"] == expected_status
+        assert response.json()["approved_by_user_id"] == onboarding[role]["id"]
+
+        status_view = client.get(
+            f"/students/late-requests/{request_id}",
+            headers=student_headers,
+        )
+        assert status_view.status_code == 200
+        assert status_view.json()["status"] == expected_status
+        assert status_view.json()["approved_by_name"] == onboarding[role]["full_name"]
+        assert status_view.json()["approved_by_role"] == role
+
+        db = SessionLocal()
+        permissions = db.query(LateEntryPermission).filter_by(request_id=request_id).all()
+        db.close()
+        assert len(permissions) == (1 if decision == "approve" else 0)
+
+        other_role = "hod" if role == "advisor" else "advisor"
+        duplicate = client.post(
+            f"/staff/late-requests/{request_id}/{decision}",
+            headers=onboarding[f"{other_role}_headers"],
+            json={"decision_note": "Duplicate decision"},
+        )
+        assert duplicate.status_code == 409
 
 
 def test_student_can_view_active_permission_and_security_can_queue_approved_students() -> None:
@@ -580,6 +760,40 @@ def test_student_can_view_active_permission_and_security_can_queue_approved_stud
         assert queue.status_code == 200
         assert queue.json()[0]["student_id"] == onboarding["student"]["id"]
         assert queue.json()[0]["approved_by_user_id"] == onboarding["advisor"]["id"]
+
+        permission_id = queue.json()[0]["permission_id"]
+        entered = client.post(
+            f"/security/permissions/{permission_id}/enter",
+            headers=security_headers,
+        )
+        assert entered.status_code == 200
+        assert entered.json()["student_name"] == onboarding["student"]["full_name"]
+        assert entered.json()["gate_code"] == onboarding["gate"]["code"]
+
+        queue_after_entry = client.get(
+            "/security/approved-students",
+            headers=security_headers,
+        )
+        assert queue_after_entry.status_code == 200
+        assert queue_after_entry.json() == []
+
+        history = client.get("/security/entry-history", headers=security_headers)
+        assert history.status_code == 200
+        assert len(history.json()) == 1
+        assert history.json()[0]["permission_id"] == permission_id
+        assert history.json()[0]["security_name"] == "Queue Security"
+
+        duplicate_entry = client.post(
+            f"/security/permissions/{permission_id}/enter",
+            headers=security_headers,
+        )
+        assert duplicate_entry.status_code == 409
+
+        denied_entry = client.post(
+            f"/security/permissions/{permission_id}/enter",
+            headers=student_headers,
+        )
+        assert denied_entry.status_code == 403
 
 
 def test_department_qr_verification_requires_authentication() -> None:
@@ -904,7 +1118,45 @@ def test_messages_send_receive_resend_and_acknowledge_without_duplicates() -> No
         assert len(student_outbox.json()["items"]) == 1
 
 
-def test_websocket_delivers_live_message_and_accepts_receipt_ack() -> None:
+def test_message_delete_is_private_to_each_participant_and_synced_live() -> None:
+    with TestClient(app) as client:
+        _student_auth, student_headers, onboarding = provision_student(client)
+        payload = {
+            "recipient_id": onboarding["hod"]["id"],
+            "client_message_id": str(uuid4()),
+            "body": "Please review my late-entry request",
+        }
+        sent = client.post("/messages", headers=student_headers, json=payload)
+        message_id = sent.json()["id"]
+        assert client.get("/messages", headers=student_headers).json()["items"]
+        assert client.get("/messages", headers=onboarding["hod_headers"]).json()["items"]
+
+        ticket = client.post("/realtime/ticket", headers=student_headers)
+        with client.websocket_connect(
+            f"/ws/messages?ticket={ticket.json()['ticket']}",
+            headers={"origin": "http://127.0.0.1:8000"},
+        ) as websocket:
+            sender_delete = client.delete(f"/messages/{message_id}", headers=student_headers)
+            deletion_event = websocket.receive_json()
+
+        assert sender_delete.status_code == 200
+        assert deletion_event == {"type": "message.deleted", "message_id": message_id}
+        assert client.get("/messages", headers=student_headers).json()["items"] == []
+        assert len(client.get("/messages", headers=onboarding["hod_headers"]).json()["items"]) == 1
+        assert client.post("/messages", headers=student_headers, json=payload).status_code == 409
+
+        recipient_delete = client.delete(
+            f"/messages/{message_id}", headers=onboarding["hod_headers"]
+        )
+        assert recipient_delete.status_code == 200
+        assert client.get("/messages", headers=onboarding["hod_headers"]).json()["items"] == []
+        assert client.delete(
+            f"/messages/{message_id}", headers=onboarding["admin_headers"]
+        ).status_code == 404
+
+
+@pytest.mark.parametrize("origin", ["http://localhost:5173", "http://127.0.0.1:8000"])
+def test_websocket_delivers_live_message_and_accepts_receipt_ack(origin: str) -> None:
     with TestClient(app) as client:
         _student_auth, student_headers, onboarding = provision_student(client)
         ticket_response = client.post("/realtime/ticket", headers=onboarding["hod_headers"])
@@ -913,7 +1165,7 @@ def test_websocket_delivers_live_message_and_accepts_receipt_ack() -> None:
 
         with client.websocket_connect(
             f"/ws/messages?ticket={ticket}",
-            headers={"origin": "http://localhost:5173"},
+            headers={"origin": origin},
         ) as websocket:
             sent = client.post(
                 "/messages",

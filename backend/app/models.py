@@ -52,7 +52,14 @@ class Department(Base):
     code: Mapped[str] = mapped_column(String(32))
     name: Mapped[str] = mapped_column(String(180))
     hod_user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), unique=True, nullable=True
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="departments_hod_user_id_fkey",
+        ),
+        unique=True,
+        nullable=True,
     )
 
 
@@ -137,6 +144,10 @@ class User(Base):
 
 class LateRequest(Base):
     __tablename__ = "late_requests"
+    __table_args__ = (
+        Index("ix_late_requests_advisor_status_requested", "advisor_user_id", "status", "requested_at"),
+        Index("ix_late_requests_hod_status_requested", "hod_user_id", "status", "requested_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -158,12 +169,20 @@ class LateRequest(Base):
 
 class LateEntryPermission(Base):
     __tablename__ = "late_entry_permissions"
+    __table_args__ = (
+        UniqueConstraint("permission_id", name="uq_late_entry_permissions_permission_id"),
+        UniqueConstraint("request_id", name="uq_late_entry_permissions_request_id"),
+        Index("ix_late_entry_permissions_permission_id", "permission_id"),
+        Index("ix_late_entry_permissions_request_id", "request_id"),
+        Index("ix_late_entry_permissions_student_status_valid_until", "student_id", "status", "valid_until"),
+        Index("ix_late_entry_permissions_status_valid_until", "status", "valid_until"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     permission_id: Mapped[str] = mapped_column(
-        String(32), unique=True, index=True, default=lambda: f"P-{secrets.token_hex(4).upper()}"
+        String(32), default=lambda: f"P-{secrets.token_hex(4).upper()}"
     )
-    request_id: Mapped[int] = mapped_column(ForeignKey("late_requests.id", ondelete="CASCADE"), unique=True, index=True)
+    request_id: Mapped[int] = mapped_column(ForeignKey("late_requests.id", ondelete="CASCADE"))
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     approved_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     approver_role: Mapped[str] = mapped_column(String(24))
@@ -174,6 +193,29 @@ class LateEntryPermission(Base):
     valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="approved")
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class GateEntryEvent(Base):
+    __tablename__ = "gate_entry_events"
+    __table_args__ = (
+        UniqueConstraint("permission_id", name="uq_gate_entry_events_permission_id"),
+        Index("ix_gate_entry_events_gate_entered", "gate_id", "entered_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    permission_id: Mapped[str] = mapped_column(String(32))
+    student_id: Mapped[int] = mapped_column(Integer)
+    student_name: Mapped[str] = mapped_column(String(160))
+    register_number: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    department_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    gate_id: Mapped[int] = mapped_column(Integer)
+    gate_code: Mapped[str] = mapped_column(String(32))
+    gate_name: Mapped[str] = mapped_column(String(100))
+    security_user_id: Mapped[int] = mapped_column(Integer)
+    security_name: Mapped[str] = mapped_column(String(160))
+    entered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
@@ -195,6 +237,8 @@ class DirectMessage(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sender_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recipient_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class RealtimeTicket(Base):

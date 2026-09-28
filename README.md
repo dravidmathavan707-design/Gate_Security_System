@@ -60,6 +60,19 @@ npm run dev
 
 Open the Vite URL (normally `http://localhost:5173`). The API base defaults to `http://127.0.0.1:8000`; set `VITE_API_BASE_URL` when the API runs elsewhere. Camera scanning requires browser camera permission and a secure context (`localhost` is allowed during development).
 
+## Run frontend and API on one port
+
+For a single browser origin, build the frontend and let FastAPI serve the built files alongside its API on port 8000:
+
+```powershell
+Set-Location frontend/student
+npm run build
+Set-Location ../../backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app
+```
+
+Open `http://127.0.0.1:8000/`. The Vite dev server on port 5173 remains available for hot-reload development, but it is not needed in this single-port mode. The backend serves the frontend build when `frontend/student/dist` exists.
+
 ## Verify the QR slice
 
 ```powershell
@@ -105,3 +118,59 @@ The database is authoritative: a disconnected client catches up through the curs
 8. Parent notification
 9. Admin and analytics
 10. Security testing and deployment
+
+
+
+run comment : backend:
+
+ cd "c:\Users\dravi\OneDrive\Desktop\late_entery\backend"; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+
+ run comment: forndent:
+
+  Set-Location 'c:\Users\dravi\OneDrive\Desktop\late_entery\frontend\student'; npm run dev
+
+
+
+cd "c:\Users\dravi\OneDrive\Desktop\late_entery\frontend\student"
+npm run build
+
+
+
+
+cd "c:\Users\dravi\OneDrive\Desktop\late_entery\backend"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_student_qr.py
+
+
+
+$root = "C:\Users\dravi\OneDrive\Desktop\late_entery"
+Remove-Item Env:VITE_API_BASE_URL -ErrorAction SilentlyContinue
+npm --prefix "$root\frontend\student" run build
+
+$backend = "$root\backend"
+Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:JWT_SECRET -ErrorAction SilentlyContinue
+& "$backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir $backend --host 127.0.0.1 --port 8000 --reload --reload-dir "$backend\app"
+
+Open http://127.0.0.1:8000/
+
+
+Backend (PostgreSQL API on port 8000):
+
+$backend = "C:\Users\dravi\OneDrive\Desktop\late_entery\backend"
+Remove-Item Env:DATABASE_URL, Env:JWT_SECRET -ErrorAction SilentlyContinue
+& "$backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir $backend --host 127.0.0.1 --port 8000 --reload --reload-dir "$backend\app"
+
+Frontend (Vite on port 5173, using the API on 8000):
+
+$frontend = "C:\Users\dravi\OneDrive\Desktop\late_entery\frontend\student"
+Remove-Item Env:VITE_API_BASE_URL -ErrorAction SilentlyContinue
+npm --prefix $frontend run dev
+
+
+Then open http://127.0.0.1:5173/. These are the separate development-server commands; the single-port mode is served at http://127.0.0.1:8000/ without starting Vite.
+
+11:47
+
+
+http://127.0.0.1:8000/

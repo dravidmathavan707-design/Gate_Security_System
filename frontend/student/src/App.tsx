@@ -4,6 +4,7 @@ import {
   BadgeCheck,
   Check,
   ChevronRight,
+  Clock3,
   CircleAlert,
   ClipboardCheck,
   Eye,
@@ -13,16 +14,18 @@ import {
   KeyRound,
   LogOut,
   QrCode,
+  RefreshCw,
   RotateCcw,
   Settings2,
   ShieldCheck,
 } from 'lucide-react'
 import './App.css'
-import { clearSession, getCollegeBranding, getCurrentUser, hasSession, login, resolvePhotoUrl, verifyDepartmentQr, type Account, type CollegeBranding, type StudentVerification } from './services/api'
+import { clearSession, getCollegeBranding, getCurrentUser, getStudentLateRequest, getStudentLateRequestHistory, hasSession, login, resolvePhotoUrl, submitLateEntryRequest, verifyDepartmentQr, type Account, type CollegeBranding, type LateRequest, type LateRequestHistoryItem, type StudentVerification } from './services/api'
 import { AdminWorkspace } from './components/AdminWorkspace'
 import { SecurityWorkspace } from './components/SecurityWorkspace'
 import { StaffWorkspace } from './components/StaffWorkspace'
 import { SuperAdminWorkspace } from './components/SuperAdminWorkspace'
+import { LateRequestHistoryList } from './components/LateRequestHistoryList'
 import { ProfileAvatar } from './components/ProfileAvatar'
 const QRScanner = lazy(() => import('./components/QRScanner').then(({ QRScanner: Scanner }) => ({ default: Scanner })))
 
@@ -53,8 +56,17 @@ function App() {
   const [account, setAccount] = useState<Account | null>(null)
   const [collegeBranding, setCollegeBranding] = useState<CollegeBranding | null>(null)
   const [verifiedStudent, setVerifiedStudent] = useState<StudentVerification | null>(null)
-  const [stage, setStage] = useState<'scan' | 'details'>('scan')
+  const [stage, setStage] = useState<'scan' | 'details' | 'status'>('scan')
   const [isConfirmed, setIsConfirmed] = useState(false)
+  const [lateReason, setLateReason] = useState('')
+  const [lateRequest, setLateRequest] = useState<LateRequest | null>(null)
+  const [statusRefreshError, setStatusRefreshError] = useState('')
+  const [isRefreshingStatus, setIsRefreshingStatus] = useState(false)
+  const [studentView, setStudentView] = useState<'checkin' | 'history'>('checkin')
+  const [studentHistory, setStudentHistory] = useState<LateRequestHistoryItem[]>([])
+  const [studentHistoryLoading, setStudentHistoryLoading] = useState(false)
+  const [studentHistoryError, setStudentHistoryError] = useState('')
+  const [studentHistoryRefreshKey, setStudentHistoryRefreshKey] = useState(0)
   const [scannerAttempt, setScannerAttempt] = useState(0)
   const [selectedRole, setSelectedRole] = useState<PortalRole | null>(null)
   const [isRestoring, setIsRestoring] = useState(() => hasSession())
@@ -87,16 +99,77 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!account) {
-      setCollegeBranding(null)
-      return
-    }
+    if (!account) return
     let active = true
     getCollegeBranding()
       .then((branding) => { if (active) setCollegeBranding(branding) })
       .catch(() => { if (active) setCollegeBranding(null) })
     return () => { active = false }
-  }, [account?.id])
+  }, [account])
+
+  useEffect(() => {
+    const requestId = lateRequest?.id
+    const requestStatus = lateRequest?.status
+    if (account?.role !== 'student' || stage !== 'status' || !requestId || requestStatus !== 'pending_approval') return
+
+    let active = true
+    let requestInFlight = false
+    const refreshStatus = async () => {
+      if (requestInFlight) return
+      requestInFlight = true
+      try {
+        const updatedRequest = await getStudentLateRequest(requestId)
+        if (active) {
+          setLateRequest(updatedRequest)
+          setStatusRefreshError('')
+        }
+      } catch (requestError) {
+        if (active) setStatusRefreshError(requestError instanceof Error ? requestError.message : 'Could not refresh request status.')
+      } finally {
+        requestInFlight = false
+      }
+    }
+
+    void refreshStatus()
+    const timer = window.setInterval(() => void refreshStatus(), 5000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [account?.role, lateRequest?.id, lateRequest?.status, stage])
+
+  useEffect(() => {
+    if (account?.role !== 'student' || studentView !== 'history') return
+    let active = true
+    getStudentLateRequestHistory()
+      .then((items) => {
+        if (active) {
+          setStudentHistory(items)
+          setStudentHistoryError('')
+        }
+      })
+      .catch((requestError) => {
+        if (active) setStudentHistoryError(requestError instanceof Error ? requestError.message : 'Could not load your request history.')
+      })
+      .finally(() => {
+        if (active) setStudentHistoryLoading(false)
+      })
+    return () => { active = false }
+  }, [account?.role, lateRequest?.status, studentHistoryRefreshKey, studentView])
+
+  async function refreshStudentRequestStatus() {
+    if (!lateRequest) return
+    setIsRefreshingStatus(true)
+    try {
+      const updatedRequest = await getStudentLateRequest(lateRequest.id)
+      setLateRequest(updatedRequest)
+      setStatusRefreshError('')
+    } catch (requestError) {
+      setStatusRefreshError(requestError instanceof Error ? requestError.message : 'Could not refresh request status.')
+    } finally {
+      setIsRefreshingStatus(false)
+    }
+  }
 
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -123,6 +196,9 @@ function App() {
   async function handleQrValue(qrValue: string) {
     setError('')
     setScannerError('')
+    setLateReason('')
+    setLateRequest(null)
+    setStatusRefreshError('')
     setIsSubmitting(true)
     try {
       const verified = await verifyDepartmentQr(qrValue.trim())
@@ -137,12 +213,42 @@ function App() {
     }
   }
 
+  async function handleLateRequestSubmit() {
+    if (!verifiedStudent) return
+    const reason = lateReason.trim()
+    if (!reason) {
+      setError('Please add a brief reason before sending the late-entry request.')
+      return
+    }
+
+    setIsSubmitting(true)
+    setError('')
+    try {
+      const createdRequest = await submitLateEntryRequest(reason)
+      setLateRequest(createdRequest)
+      setStage('status')
+      setLateReason('')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The late-entry request could not be sent.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
   function handleSignOut() {
     clearSession()
     setAccount(null)
+    setCollegeBranding(null)
     setVerifiedStudent(null)
     setStage('scan')
     setSelectedRole(null)
+    setLateReason('')
+    setLateRequest(null)
+    setStatusRefreshError('')
+    setIsConfirmed(false)
+    setStudentView('checkin')
+    setStudentHistory([])
+    setStudentHistoryError('')
     setError('')
   }
 
@@ -172,13 +278,46 @@ function App() {
 
       {account?.role === 'student' ? (
         <main className="content-area">
+          <nav className="student-view-tabs" aria-label="Student sections">
+            <button type="button" className={studentView === 'checkin' ? 'is-active' : ''} aria-pressed={studentView === 'checkin'} onClick={() => setStudentView('checkin')}>
+              <QrCode size={16} /> Check in
+            </button>
+            <button type="button" className={studentView === 'history' ? 'is-active' : ''} aria-pressed={studentView === 'history'} onClick={() => {
+              setStudentHistoryLoading(true)
+              setStudentView('history')
+            }}>
+              <Clock3 size={16} /> Late-entry history
+            </button>
+          </nav>
+          {studentView === 'history' ? (
+            <section className="student-history-panel">
+              <div className="page-heading student-history-heading">
+                <div>
+                  <p className="eyebrow"><span className="eyebrow-rule" /> STUDENT RECORDS <span className="eyebrow-divider">/</span> LATE ENTRY</p>
+                  <h1>Your request history<span className="title-period">.</span></h1>
+                  <p className="page-intro">Review request reasons, status, assigned staff, and decisions.</p>
+                </div>
+                <button className="text-button" type="button" onClick={() => {
+                  setStudentHistoryLoading(true)
+                  setStudentHistoryRefreshKey((value) => value + 1)
+                }} disabled={studentHistoryLoading}>
+                  <RefreshCw size={16} /> {studentHistoryLoading ? 'Loading…' : 'Refresh'}
+                </button>
+              </div>
+              {studentHistoryError && <p className="error-message" role="alert"><CircleAlert size={16} />{studentHistoryError}</p>}
+              {studentHistoryLoading && studentHistory.length === 0
+                ? <div className="late-history-empty">Loading your late-entry history…</div>
+                : <LateRequestHistoryList entries={studentHistory} emptyMessage="Your submitted late-entry requests will appear here." showStudent={false} />}
+            </section>
+          ) : (
+            <>
           <div className="page-heading">
             <div>
-              <p className="eyebrow"><span className="eyebrow-rule" /> STUDENT CHECK-IN <span className="eyebrow-divider">/</span> IDENTITY</p>
-              <h1>Verify your identity<span className="title-period">.</span></h1>
-              <p className="page-intro">A quick check before your campus entry request.</p>
+              <p className="eyebrow"><span className="eyebrow-rule" /> STUDENT CHECK-IN <span className="eyebrow-divider">/</span> {stage === 'scan' ? 'IDENTITY' : stage === 'details' ? 'CONFIRM DETAILS' : 'REQUEST STATUS'}</p>
+              <h1>{stage === 'status' ? 'Late-entry request' : 'Verify your identity'}<span className="title-period">.</span></h1>
+              <p className="page-intro">{stage === 'status' ? 'Track your request while your assigned staff review it.' : 'A quick check before your campus entry request.'}</p>
             </div>
-            <div className="step-count"><span>{stage === 'scan' ? '01' : '02'}</span><i />02</div>
+            <div className="step-count"><span>{stage === 'scan' ? '01' : stage === 'details' ? '02' : '03'}</span><i />03</div>
           </div>
 
           <div className="verification-layout">
@@ -188,9 +327,14 @@ function App() {
                 <span><b>Department QR</b><small>Scan your gate code</small></span>
               </div>
               <div className="step-connector" />
-              <div className={`step-item ${stage === 'details' ? 'is-current' : ''}`}>
-                <span className="step-icon"><Fingerprint size={18} /></span>
+              <div className={`step-item ${stage === 'details' ? 'is-current' : stage === 'status' ? 'is-complete' : ''}`}>
+                <span className="step-icon">{stage === 'status' ? <Check size={18} /> : <Fingerprint size={18} />}</span>
                 <span><b>Confirm details</b><small>Review your record</small></span>
+              </div>
+              <div className="step-connector" />
+              <div className={`step-item ${stage === 'status' ? 'is-current' : ''}`}>
+                <span className="step-icon">{lateRequest?.status === 'approved' ? <Check size={18} /> : <Clock3 size={18} />}</span>
+                <span><b>Request status</b><small>{lateRequest?.status === 'approved' ? 'Approved' : lateRequest?.status === 'rejected' ? 'Declined' : 'Waiting'}</small></span>
               </div>
               <div className="rail-note"><ShieldCheck size={16} /><span>Identity is checked against your student account.</span></div>
             </aside>
@@ -230,7 +374,7 @@ function App() {
                   </div>
                   {error && <p className="error-message" role="alert"><CircleAlert size={16} />{error}</p>}
                 </>
-              ) : (
+              ) : stage === 'details' ? (
                 <>
                   <div className="panel-heading">
                     <div>
@@ -253,13 +397,83 @@ function App() {
                   </dl>
                   {error && <p className="error-message" role="alert"><CircleAlert size={16} />{error}</p>}
                   {isConfirmed && <p className="confirmation-note"><Check size={16} /> Your identity is confirmed against the student account.</p>}
+                  {isConfirmed && (
+                    <div className="late-request-box">
+                      <label className="workspace-field late-request-field">
+                        <span>Reason for late entry</span>
+                        <textarea
+                          rows={3}
+                          value={lateReason}
+                          onChange={(event) => setLateReason(event.target.value)}
+                          placeholder="Tell the HOD or advisor why you are arriving late"
+                        />
+                      </label>
+                    </div>
+                  )}
                   <div className="confirm-actions">
-                    <button className="text-button" type="button" onClick={() => { setStage('scan'); setVerifiedStudent(null); setIsConfirmed(false); setError('') }}>
+                    <button className="text-button" type="button" onClick={() => { setStage('scan'); setVerifiedStudent(null); setIsConfirmed(false); setLateReason(''); setLateRequest(null); setError('') }}>
                       <RotateCcw size={16} /> Scan again
                     </button>
-                    <button className="primary-button" type="button" disabled={isSubmitting || isConfirmed} onClick={() => setIsConfirmed(true)}>
-                      {isConfirmed ? <>Confirmed <Check size={17} /></> : <>Confirm details <ChevronRight size={17} /></>}
+                    {!isConfirmed ? (
+                      <button className="primary-button" type="button" disabled={isSubmitting} onClick={() => setIsConfirmed(true)}>
+                        Confirm details <ChevronRight size={17} />
+                      </button>
+                    ) : (
+                      <button className="primary-button" type="button" disabled={isSubmitting || !lateReason.trim()} onClick={() => void handleLateRequestSubmit()}>
+                        {isSubmitting ? 'Sending…' : <>Send late request <Check size={17} /></>}
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="panel-heading">
+                    <div>
+                      <span className="panel-kicker">STEP 03 <span>/</span> REQUEST STATUS</span>
+                      <h2>{lateRequest?.status === 'approved' ? 'Request approved' : lateRequest?.status === 'rejected' ? 'Request not approved' : 'Waiting for approval'}</h2>
+                      <p>{lateRequest?.status === 'approved'
+                        ? 'Your late-entry request was approved. Show this status to security at the gate.'
+                        : lateRequest?.status === 'rejected'
+                          ? 'Your assigned staff reviewed this late-entry request.'
+                          : 'Your request was sent to the responsible staff. This page checks for updates automatically.'}</p>
+                    </div>
+                    <span className={`request-status-mark ${lateRequest?.status === 'approved' ? 'is-approved' : lateRequest?.status === 'rejected' ? 'is-rejected' : 'is-pending'}`}>
+                      {lateRequest?.status === 'approved' ? <Check size={21} /> : lateRequest?.status === 'rejected' ? <CircleAlert size={21} /> : <Clock3 size={21} />}
+                    </span>
+                  </div>
+
+                  <div className={`request-status-banner ${lateRequest?.status === 'approved' ? 'is-approved' : lateRequest?.status === 'rejected' ? 'is-rejected' : 'is-pending'}`} role="status">
+                    <b>{lateRequest?.status === 'approved' ? 'APPROVED' : lateRequest?.status === 'rejected' ? 'NOT APPROVED' : 'PENDING REVIEW'}</b>
+                    <span>{lateRequest?.approved_by_name
+                      ? `${lateRequest.approved_by_name} (${lateRequest.approved_by_role === 'hod' ? 'HOD' : 'Advisor'}) ${lateRequest.status === 'approved' ? 'approved' : 'reviewed'} your request.`
+                      : 'Sent to your assigned advisor and HOD. Either authorized staff member can review it.'}</span>
+                  </div>
+
+                  <dl className="details-list request-status-details">
+                    <div><dt>Request</dt><dd>#{lateRequest?.id ?? '—'}</dd></div>
+                    <div><dt>Department</dt><dd>{verifiedStudent?.department_code ?? '—'}</dd></div>
+                    <div><dt>Reason</dt><dd>{lateRequest?.reason ?? '—'}</dd></div>
+                    <div><dt>Assigned advisor</dt><dd>{lateRequest?.advisor_name ?? 'Your class advisor'}</dd></div>
+                    <div><dt>Department HOD</dt><dd>{lateRequest?.hod_name ?? 'Your department HOD'}</dd></div>
+                    {lateRequest?.decision_note && <div><dt>Staff note</dt><dd>{lateRequest.decision_note}</dd></div>}
+                  </dl>
+
+                  {statusRefreshError && <p className="error-message" role="alert"><CircleAlert size={16} />{statusRefreshError}</p>}
+                  <div className="confirm-actions request-status-actions">
+                    <button className="text-button" type="button" onClick={() => void refreshStudentRequestStatus()} disabled={isRefreshingStatus}>
+                      <RefreshCw size={16} /> {isRefreshingStatus ? 'Checking…' : 'Check status'}
                     </button>
+                    {lateRequest?.status !== 'pending_approval' && (
+                      <button className="primary-button" type="button" onClick={() => {
+                        setStage('scan')
+                        setVerifiedStudent(null)
+                        setLateRequest(null)
+                        setIsConfirmed(false)
+                        setError('')
+                      }}>
+                        Start another check <ArrowRight size={16} />
+                      </button>
+                    )}
                   </div>
                 </>
               )}
@@ -267,6 +481,8 @@ function App() {
           </div>
 
           <footer className="page-footer"><span>SMARTGATE <b>/</b> STUDENT PORTAL</span><span><KeyRound size={13} /> SESSION ENCRYPTED</span></footer>
+            </>
+          )}
         </main>
       ) : account?.role === 'super_admin' ? (
         <SuperAdminWorkspace account={account} onSignOut={handleSignOut} />

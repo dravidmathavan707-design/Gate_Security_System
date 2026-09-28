@@ -10,6 +10,7 @@ import {
   createStudentAccount,
   deleteDepartment,
   deleteUser,
+  getAdminLateRequestHistory,
   getAdminDepartmentQrs,
   getAdminUsers,
   getCollege,
@@ -25,7 +26,9 @@ import {
   type Department,
   type DepartmentQr,
   type Gate,
+  type LateRequestHistoryItem,
 } from '../services/api'
+import { LateRequestHistoryList } from './LateRequestHistoryList'
 import { DepartmentQrPreview } from './DepartmentQrPreview'
 import { InboxPanel } from './InboxPanel'
 import { ProfileAvatar } from './ProfileAvatar'
@@ -35,7 +38,7 @@ interface AdminWorkspaceProps {
   onSignOut: () => void
 }
 
-type AdminTab = 'overview' | 'departments' | 'accounts' | 'gates' | 'rules'
+type AdminTab = 'overview' | 'departments' | 'accounts' | 'gates' | 'rules' | 'history'
 type NewAccountRole = 'hod' | 'advisor' | 'security' | 'student'
 
 export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
@@ -47,6 +50,7 @@ export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
   const [gates, setGates] = useState<Gate[]>([])
   const [users, setUsers] = useState<Account[]>([])
   const [qrs, setQrs] = useState<DepartmentQr[]>([])
+  const [lateRequestHistory, setLateRequestHistory] = useState<LateRequestHistoryItem[]>([])
   const [role, setRole] = useState<NewAccountRole>('hod')
   const [refreshKey, setRefreshKey] = useState(0)
   const [isBusy, setIsBusy] = useState(false)
@@ -73,14 +77,15 @@ export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
 
   useEffect(() => {
     let active = true
-    Promise.all([getCollege(), getDepartments(), getGates(), getAdminUsers(), getAdminDepartmentQrs()])
-      .then(([collegeData, departmentData, gateData, userData, qrData]) => {
+    Promise.all([getCollege(), getDepartments(), getGates(), getAdminUsers(), getAdminDepartmentQrs(), getAdminLateRequestHistory()])
+      .then(([collegeData, departmentData, gateData, userData, qrData, historyData]) => {
         if (!active) return
         setCollege(collegeData)
         setDepartments(departmentData)
         setGates(gateData)
         setUsers(userData)
         setQrs(qrData)
+        setLateRequestHistory(historyData)
       })
       .catch((loadError: unknown) => {
         if (active) setError(loadError instanceof Error ? loadError.message : 'Could not load college setup.')
@@ -281,6 +286,25 @@ export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
       .some((value) => value?.toLowerCase().includes(query))
   })
 
+  const departmentDisplayOrder: Record<string, number> = { CCE: 0, CSE: 1, ECE: 2, EEE: 3, MECH: 4, CIVIL: 5 }
+  const lateHistoryTotals = departments
+    .map((department) => {
+      const requests = lateRequestHistory.filter((item) => item.department_id === department.id)
+      return {
+        department,
+        total: requests.length,
+        pending: requests.filter((item) => item.status === 'pending_approval').length,
+        approved: requests.filter((item) => item.status === 'approved').length,
+        rejected: requests.filter((item) => item.status === 'rejected').length,
+      }
+    })
+    .sort((left, right) => {
+      const leftCode = left.department.code.toUpperCase()
+      const rightCode = right.department.code.toUpperCase()
+      return (departmentDisplayOrder[leftCode] ?? 999) - (departmentDisplayOrder[rightCode] ?? 999)
+        || leftCode.localeCompare(rightCode)
+    })
+
   return (
     <main className="workspace-area">
       <header className="workspace-welcome">
@@ -301,7 +325,7 @@ export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
       <nav className="workspace-tabs" aria-label="Admin sections" ref={tabsRef}>
         {tabIndicator && <span className="workspace-tab-indicator" aria-hidden="true" style={{ width: tabIndicator.width, transform: `translateX(${tabIndicator.left}px)` }} />}
         {([
-          ['overview', 'Overview'], ['departments', 'Departments'], ['accounts', 'Accounts'], ['gates', 'Gates & QR'], ['rules', 'College rules'],
+          ['overview', 'Overview'], ['departments', 'Departments'], ['accounts', 'Accounts'], ['gates', 'Gates & QR'], ['history', 'Late history'], ['rules', 'College rules'],
         ] as const).map(([key, label]) => <button key={key} className={tab === key ? 'is-active' : ''} type="button" onClick={() => setTab(key)}>{label}</button>)}
       </nav>
 
@@ -349,6 +373,35 @@ export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
               {qrs.filter((qr) => qr.status === 'active').length === 0 && <p className="workspace-muted">Create a department QR after configuring a gate.</p>}
             </div>
           </div>
+        </section>
+      </>}
+
+      {tab === 'history' && <>
+        <section className="workspace-panel late-history-summary-panel">
+          <div className="workspace-section-heading">
+            <div><span className="workspace-eyebrow">COLLEGE LATE ENTRY / {lateRequestHistory.length} TOTAL</span><h2>Department totals</h2></div>
+            <UsersRound size={18} />
+          </div>
+          <div className="late-history-summary-grid">
+            {lateHistoryTotals.map(({ department, total, pending, approved, rejected }) => (
+              <article className="late-history-summary-item" key={department.id}>
+                <div><strong>{department.code}</strong><span>{total} total</span></div>
+                <small>{department.name}</small>
+                <div className="late-history-summary-status"><span>{pending} waiting</span><span>{approved} approved</span><span>{rejected} rejected</span></div>
+              </article>
+            ))}
+            {lateHistoryTotals.length === 0 && <p className="workspace-muted">No departments are configured.</p>}
+          </div>
+        </section>
+        <section className="workspace-panel late-history-panel">
+          <div className="workspace-section-heading">
+            <div><span className="workspace-eyebrow">ALL DEPARTMENTS / FIXED ORDER</span><h2>Late-entry requests</h2></div>
+            <Building2 size={18} />
+          </div>
+          <LateRequestHistoryList
+            entries={lateRequestHistory}
+            emptyMessage="Student late-entry requests will appear here with their department and approval history."
+          />
         </section>
       </>}
 

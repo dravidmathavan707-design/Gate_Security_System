@@ -13,12 +13,20 @@ if len(JWT_SECRET) < 32 or JWT_SECRET.lower().startswith(("replace-with-", "deve
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_MINUTES = 60
 DEFAULT_CORS_ORIGINS = [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
+    "http://localhost:5178",
+    "http://127.0.0.1:5178",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
 ]
 CORS_ORIGINS = [
     origin.strip()

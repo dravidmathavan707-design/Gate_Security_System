@@ -119,6 +119,47 @@ export interface StaffAssignments {
   }>
 }
 
+export interface LateRequest {
+  id: number
+  student_id: number
+  department_id: number
+  advisor_user_id: number | null
+  hod_user_id: number | null
+  reason: string
+  status: 'pending_approval' | 'approved' | 'rejected'
+  decision_note: string | null
+  requested_at: string
+  approved_at: string | null
+  approved_by_user_id: number | null
+  advisor_name?: string | null
+  hod_name?: string | null
+  approved_by_name?: string | null
+  approved_by_role?: 'advisor' | 'hod' | null
+}
+
+export interface LateRequestHistoryItem {
+  id: number
+  student_id: number
+  student_name: string
+  student_identifier: string | null
+  register_number: string | null
+  year: string | null
+  section: string | null
+  department_id: number
+  department_code: string
+  department_name: string
+  advisor_name: string | null
+  hod_name: string | null
+  reason: string
+  status: 'pending_approval' | 'approved' | 'rejected'
+  decision_note: string | null
+  requested_at: string
+  approved_at: string | null
+  approved_by_user_id: number | null
+  approved_by_name: string | null
+  approved_by_role: 'advisor' | 'hod' | null
+}
+
 export interface LatePermission {
   permission_id: string
   request_id: number
@@ -134,6 +175,21 @@ export interface LatePermission {
   valid_from: string
   valid_until: string
   status: 'approved' | 'rejected'
+}
+
+export interface GateEntryEvent {
+  id: number
+  permission_id: string
+  student_id: number
+  student_name: string
+  register_number: string | null
+  department_code: string | null
+  gate_id: number
+  gate_code: string
+  gate_name: string
+  security_user_id: number
+  security_name: string
+  entered_at: string
 }
 
 export interface DirectMessage {
@@ -391,8 +447,52 @@ export async function getStaffAssignments(): Promise<StaffAssignments> {
   return request<StaffAssignments>('/staff/assignments', { headers: authHeaders() })
 }
 
+export async function getStaffLateRequests(): Promise<LateRequest[]> {
+  return request<LateRequest[]>('/staff/late-requests', { headers: authHeaders() })
+}
+
+export async function approveStaffLateRequest(requestId: number, decisionNote?: string): Promise<LateRequest> {
+  return request<LateRequest>(`/staff/late-requests/${requestId}/approve`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(decisionNote ? { decision_note: decisionNote } : {}),
+  })
+}
+
+export async function rejectStaffLateRequest(requestId: number, decisionNote?: string): Promise<LateRequest> {
+  return request<LateRequest>(`/staff/late-requests/${requestId}/reject`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(decisionNote ? { decision_note: decisionNote } : {}),
+  })
+}
+
 export async function getSecurityDepartmentQrs(): Promise<DepartmentQr[]> {
   return request<DepartmentQr[]>('/security/department-qrs', { headers: authHeaders() })
+}
+
+export async function submitLateEntryRequest(reason: string): Promise<LateRequest> {
+  return request<LateRequest>('/late-requests', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ reason }),
+  })
+}
+
+export async function getStudentLateRequest(requestId: number): Promise<LateRequest> {
+  return request<LateRequest>(`/students/late-requests/${requestId}`, { headers: authHeaders() })
+}
+
+export async function getStudentLateRequestHistory(): Promise<LateRequestHistoryItem[]> {
+  return request<LateRequestHistoryItem[]>('/students/late-requests', { headers: authHeaders() })
+}
+
+export async function getStaffLateRequestHistory(): Promise<LateRequestHistoryItem[]> {
+  return request<LateRequestHistoryItem[]>('/staff/late-requests/history', { headers: authHeaders() })
+}
+
+export async function getAdminLateRequestHistory(): Promise<LateRequestHistoryItem[]> {
+  return request<LateRequestHistoryItem[]>('/admin/late-requests', { headers: authHeaders() })
 }
 
 export async function getStudentPermissions(): Promise<LatePermission[]> {
@@ -401,6 +501,17 @@ export async function getStudentPermissions(): Promise<LatePermission[]> {
 
 export async function getSecurityApprovedStudents(): Promise<LatePermission[]> {
   return request<LatePermission[]>('/security/approved-students', { headers: authHeaders() })
+}
+
+export async function confirmSecurityEntry(permissionId: string): Promise<GateEntryEvent> {
+  return request<GateEntryEvent>(`/security/permissions/${encodeURIComponent(permissionId)}/enter`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+}
+
+export async function getSecurityEntryHistory(): Promise<GateEntryEvent[]> {
+  return request<GateEntryEvent[]>('/security/entry-history', { headers: authHeaders() })
 }
 
 export async function getMessages(afterId = 0): Promise<DirectMessagePage> {
@@ -424,6 +535,13 @@ export async function sendMessage(
 export async function acknowledgeMessage(messageId: number): Promise<DirectMessage> {
   return request<DirectMessage>(`/messages/${messageId}/ack`, {
     method: 'POST', headers: authHeaders(),
+  })
+}
+
+export async function deleteMessage(messageId: number): Promise<{ ok: boolean; message_id: number }> {
+  return request<{ ok: boolean; message_id: number }>(`/messages/${messageId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
   })
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, CircleAlert, Clock3, DoorOpen, RefreshCw, ScanLine, ShieldCheck, UserCheck } from 'lucide-react'
-import { getSecurityApprovedStudents, getSecurityDepartmentQrs, type Account, type DepartmentQr, type LatePermission } from '../services/api'
+import { confirmSecurityEntry, getSecurityApprovedStudents, getSecurityDepartmentQrs, getSecurityEntryHistory, type Account, type DepartmentQr, type GateEntryEvent, type LatePermission } from '../services/api'
 import { DepartmentQrPreview } from './DepartmentQrPreview'
 import { InboxPanel } from './InboxPanel'
 
@@ -12,10 +12,14 @@ interface SecurityWorkspaceProps {
 export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps) {
   const [qrs, setQrs] = useState<DepartmentQr[]>([])
   const [permissions, setPermissions] = useState<LatePermission[]>([])
+  const [entryHistory, setEntryHistory] = useState<GateEntryEvent[]>([])
   const [search, setSearch] = useState('')
   const [departmentFilter, setDepartmentFilter] = useState('all')
   const [selectedPermission, setSelectedPermission] = useState<LatePermission | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [copiedQrId, setCopiedQrId] = useState<number | null>(null)
+  const [entryFeedback, setEntryFeedback] = useState('')
+  const [isConfirmingEntry, setIsConfirmingEntry] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -23,11 +27,13 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
     Promise.all([
       getSecurityDepartmentQrs(),
       getSecurityApprovedStudents(),
+      getSecurityEntryHistory(),
     ])
-      .then(([items, queue]) => {
+      .then(([items, queue, history]) => {
         if (active) {
           setQrs(items)
           setPermissions(queue)
+          setEntryHistory(history)
           setSelectedPermission((current) => current && queue.some((permission) => permission.permission_id === current.permission_id) ? current : null)
         }
       })
@@ -80,11 +86,44 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
   const stats = useMemo(() => ({
     approved: permissions.filter((permission) => permission.status === 'approved').length,
     waiting: visiblePermissions.length,
-    entered: 0,
+    entered: entryHistory.filter((event) => new Date(event.entered_at).toDateString() === new Date().toDateString()).length,
     expired: 0,
-  }), [permissions, visiblePermissions.length])
+  }), [entryHistory, permissions, visiblePermissions.length])
 
-  const currentPermission = selectedPermission ?? visiblePermissions[0] ?? null
+  const currentPermission = selectedPermission
+
+  function handleCancelEntry() {
+    const studentName = currentPermission?.student_name ?? 'Student'
+    setSelectedPermission(null)
+    setEntryFeedback(`Entry check cancelled for ${studentName}. The approval remains in the waiting queue.`)
+  }
+
+  async function handleConfirmEntry(permission: LatePermission) {
+    setIsConfirmingEntry(true)
+    setError('')
+    setEntryFeedback('')
+    try {
+      const event = await confirmSecurityEntry(permission.permission_id)
+      setEntryHistory((current) => [event, ...current.filter((item) => item.id !== event.id)])
+      setPermissions((current) => current.filter((item) => item.permission_id !== permission.permission_id))
+      setSelectedPermission(null)
+      setEntryFeedback(`${event.student_name} confirmed inside ${event.gate_name}. Entry saved to gate history.`)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not confirm this gate entry.')
+    } finally {
+      setIsConfirmingEntry(false)
+    }
+  }
+
+  async function handleCopyQrPayload(qrId: number, payload: string) {
+    try {
+      await navigator.clipboard.writeText(payload)
+      setCopiedQrId(qrId)
+      window.setTimeout(() => setCopiedQrId((current) => (current === qrId ? null : current)), 1400)
+    } catch {
+      setError('Could not copy the QR payload from this browser.')
+    }
+  }
 
   return (
     <main className="workspace-area workspace-security-area">
@@ -101,6 +140,7 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
       </header>
 
       {error && <div className="workspace-alert"><CircleAlert size={15} />{error}</div>}
+      {entryFeedback && <div className="workspace-entry-feedback" role="status"><Check size={16} />{entryFeedback}</div>}
 
       <section className="workspace-stat-grid staff-stat-grid">
         <article><span>Approved</span><b>{stats.approved}</b><small>Ready for gate check</small></article>
@@ -172,7 +212,7 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
                   <button
                     type="button"
                     className="primary-button workspace-verify-button"
-                    onClick={() => setSelectedPermission(permission)}
+                    onClick={() => { setEntryFeedback(''); setSelectedPermission(permission) }}
                   >
                     <UserCheck size={15} /> Verify entry
                   </button>
@@ -197,6 +237,18 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
                 <div className="workspace-qr-code-label">{qr.department_code}</div>
                 <DepartmentQrPreview value={qr.qr_payload} label={`${qr.department_code} ${qr.gate_name} QR`} size={92} />
                 <div className="workspace-qr-gate-name">{qr.gate_code}</div>
+                <div style={{ marginTop: '0.7rem', width: '100%', display: 'grid', gap: '0.35rem' }}>
+                  <span style={{ fontSize: '0.72rem', color: '#64748b', letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 700 }}>QR payload</span>
+                  <code style={{ display: 'block', width: '100%', maxWidth: '100%', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap', fontSize: '0.68rem', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.55rem 0.65rem', color: '#0f172a' }}>{qr.qr_payload}</code>
+                  <button
+                    type="button"
+                    className="workspace-quiet-button"
+                    onClick={() => void handleCopyQrPayload(qr.id, qr.qr_payload)}
+                    style={{ justifySelf: 'flex-start', marginTop: '0.1rem' }}
+                  >
+                    {copiedQrId === qr.id ? 'Copied' : 'Copy payload'}
+                  </button>
+                </div>
                 <span className={`workspace-qr-status ${qr.status === 'active' ? 'is-active' : 'is-quiet'}`}>{qr.status.toUpperCase()}</span>
               </article>
             ))}
@@ -230,13 +282,48 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
                 <span>Valid until {new Date(currentPermission.valid_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
               </div>
               <div className="workspace-entry-actions">
-                <button type="button" className="workspace-quiet-button" onClick={() => setSelectedPermission(null)}>Cancel</button>
-                <button type="button" className="primary-button" onClick={() => setSelectedPermission(null)}><Check size={15} /> Inside gate</button>
+                <button type="button" className="workspace-quiet-button" onClick={handleCancelEntry} disabled={isConfirmingEntry}>Cancel</button>
+                <button type="button" className="primary-button" onClick={() => void handleConfirmEntry(currentPermission)} disabled={isConfirmingEntry}>
+                  <Check size={15} /> {isConfirmingEntry ? 'Recording…' : 'Inside gate'}
+                </button>
               </div>
             </div>
           </div>
         </section>
       )}
+
+      <section className="workspace-panel workspace-entry-history">
+        <div className="workspace-section-heading">
+          <div>
+            <span className="workspace-eyebrow">ENTRY HISTORY / {entryHistory.length} RECORDED</span>
+            <h2>Recent confirmed entries</h2>
+          </div>
+          <Clock3 size={18} />
+        </div>
+        {entryHistory.length === 0 ? (
+          <div className="workspace-queue-empty workspace-history-empty">
+            <span className="workspace-empty-mark"><DoorOpen size={20} /></span>
+            <b>No entries recorded yet</b>
+            <p>Confirmed student entries at {account.gate_assignment ?? 'this gate'} will appear here.</p>
+          </div>
+        ) : (
+          <div className="workspace-entry-history-list">
+            {entryHistory.map((event) => (
+              <article className="workspace-entry-history-row" key={event.id}>
+                <div>
+                  <strong>{event.student_name}</strong>
+                  <small>{event.register_number ?? `Student ${event.student_id}`} · {event.department_code ?? 'Department'}</small>
+                </div>
+                <div>
+                  <b>{event.gate_code} · {event.gate_name}</b>
+                  <small>Verified by {event.security_name}</small>
+                </div>
+                <time dateTime={event.entered_at}>{new Date(event.entered_at).toLocaleString()}</time>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <InboxPanel account={account} />
     </main>

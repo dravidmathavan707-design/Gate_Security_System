@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageSquareText, Radio } from 'lucide-react'
+import { ArrowUpRight, Check, CircleAlert, LoaderCircle, MessageSquareText, Radio, Trash2 } from 'lucide-react'
 import {
   acknowledgeMessage,
   connectRealtime,
   createRealtimeTicket,
+  deleteMessage,
   getDepartments,
   getGates,
   getMessages,
@@ -31,7 +32,9 @@ export function InboxPanel({ account }: InboxPanelProps) {
   const [body, setBody] = useState('')
   const [connection, setConnection] = useState<ConnectionState>('connecting')
   const [isSending, setIsSending] = useState(false)
+  const [deletingMessageId, setDeletingMessageId] = useState<number | null>(null)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [retryKey, setRetryKey] = useState(() => crypto.randomUUID())
 
   function formatRoleLabel(role: string): string {
@@ -141,6 +144,8 @@ export function InboxPanel({ account }: InboxPanelProps) {
             setMessages((current) => current.map((message) => message.id === payload.message_id
               ? { ...message, delivered_at: message.delivered_at ?? new Date().toISOString() }
               : message))
+          } else if (payload.type === 'message.deleted' && payload.message_id) {
+            setMessages((current) => current.filter((message) => message.id !== payload.message_id))
           }
         }
         socket.onclose = () => {
@@ -193,6 +198,21 @@ export function InboxPanel({ account }: InboxPanelProps) {
     }
   }
 
+  async function handleDeleteMessage(messageId: number) {
+    setError('')
+    setNotice('')
+    setDeletingMessageId(messageId)
+    try {
+      await deleteMessage(messageId)
+      setMessages((current) => current.filter((message) => message.id !== messageId))
+      setNotice('Message removed from your inbox. The other participant keeps their copy.')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Message could not be removed from your inbox.')
+    } finally {
+      setDeletingMessageId(null)
+    }
+  }
+
   const connectionLabel = {
     connecting: 'Connecting',
     live: 'Live',
@@ -232,6 +252,7 @@ export function InboxPanel({ account }: InboxPanelProps) {
       </form>
 
       {error && <p className="workspace-error" role="alert"><CircleAlert size={15} />{error}</p>}
+      {notice && <p className="workspace-message-delete-notice" role="status"><Check size={14} />{notice}</p>}
 
       <div className="workspace-message-list" aria-live="polite">
         {messages.length === 0 ? (
@@ -251,7 +272,19 @@ export function InboxPanel({ account }: InboxPanelProps) {
                   <small>{contextLabel}</small>
                 </span>
               </span>
-              <time>{new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+              <span className="workspace-message-actions">
+                <time>{new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                <button
+                  className="workspace-message-delete"
+                  type="button"
+                  title="Delete from my inbox"
+                  aria-label="Delete message from my inbox"
+                  disabled={deletingMessageId === message.id}
+                  onClick={() => void handleDeleteMessage(message.id)}
+                >
+                  {deletingMessageId === message.id ? <LoaderCircle className="spin-icon" size={15} /> : <Trash2 size={15} />}
+                </button>
+              </span>
             </div>
             <p>{message.body}</p>
             {sentByMe && <small>{message.delivered_at ? <><Check size={12} /> Delivered</> : 'Sent · awaiting receipt'}</small>}

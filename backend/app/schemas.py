@@ -183,7 +183,7 @@ class StudentCreate(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=128)
 
 
@@ -191,7 +191,7 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    email: EmailStr
+    email: str
     full_name: str
     role: str
     student_id: str | None
@@ -234,6 +234,36 @@ class LateRequestResponse(BaseModel):
     approved_by_user_id: int | None
 
 
+class StudentLateRequestStatusResponse(LateRequestResponse):
+    advisor_name: str | None = None
+    hod_name: str | None = None
+    approved_by_name: str | None = None
+    approved_by_role: Literal["advisor", "hod"] | None = None
+
+
+class LateRequestHistoryResponse(BaseModel):
+    id: int
+    student_id: int
+    student_name: str
+    student_identifier: str | None
+    register_number: str | None
+    year: str | None
+    section: str | None
+    department_id: int
+    department_code: str
+    department_name: str
+    advisor_name: str | None
+    hod_name: str | None
+    reason: str
+    status: str
+    decision_note: str | None
+    requested_at: datetime
+    approved_at: datetime | None
+    approved_by_user_id: int | None
+    approved_by_name: str | None
+    approved_by_role: Literal["advisor", "hod"] | None
+
+
 class LateEntryPermissionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -251,6 +281,23 @@ class LateEntryPermissionResponse(BaseModel):
     valid_from: datetime
     valid_until: datetime
     status: str
+
+
+class GateEntryHistoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    permission_id: str
+    student_id: int
+    student_name: str
+    register_number: str | None
+    department_code: str | None
+    gate_id: int
+    gate_code: str
+    gate_name: str
+    security_user_id: int
+    security_name: str
+    entered_at: datetime
 
 
 class AuthResponse(BaseModel):
@@ -280,6 +327,11 @@ class DirectMessageResponse(BaseModel):
 class DirectMessagePage(BaseModel):
     items: list[DirectMessageResponse]
     next_cursor: int
+
+
+class DirectMessageDeleteResponse(BaseModel):
+    ok: bool
+    message_id: int
 
 
 class RealtimeTicketResponse(BaseModel):

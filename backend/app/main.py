@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from pydantic import ValidationError
-from sqlalchemy import delete, select, tuple_, update
+from sqlalchemy import and_, delete, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from starlette.staticfiles import StaticFiles
 
 from .config import ACCESS_TOKEN_MINUTES, CORS_ORIGIN_REGEX, CORS_ORIGINS, JWT_ALGORITHM, JWT_SECRET
@@ -25,6 +25,7 @@ from .models import (
     Department,
     DepartmentGateQr,
     DirectMessage,
+    GateEntryEvent,
     Gate,
     LateEntryPermission,
     LateRequest,
@@ -45,13 +46,16 @@ from .schemas import (
     DepartmentQrPayload,
     DepartmentQrScanRequest,
     DirectMessageCreate,
+    DirectMessageDeleteResponse,
     DirectMessagePage,
     DirectMessageResponse,
     EmployeeCreate,
+    GateEntryHistoryResponse,
     GateCreate,
     GateResponse,
     LateEntryPermissionResponse,
     LateRequestCreate,
+    LateRequestHistoryResponse,
     LateRequestResponse,
     LoginRequest,
     ProfilePhotoUpdate,
@@ -60,6 +64,7 @@ from .schemas import (
     SecurityStaffCreate,
     StaffAssignmentResponse,
     StudentCreate,
+    StudentLateRequestStatusResponse,
     StudentVerificationResponse,
     UserResponse,
 )
@@ -228,10 +233,12 @@ def serialize_department_qr(db: Session, qr: DepartmentGateQr) -> DepartmentGate
     )
 
 
-def serialize_late_entry_permission(db: Session, permission: LateEntryPermission) -> LateEntryPermissionResponse:
-    student = db.get(User, permission.student_id)
-    approver = db.get(User, permission.approved_by_user_id)
-    department = db.get(Department, student.department_id) if student and student.department_id is not None else None
+def serialize_late_entry_permission(
+    permission: LateEntryPermission,
+    student: User,
+    approver: User | None,
+    department: Department | None,
+) -> LateEntryPermissionResponse:
     return LateEntryPermissionResponse(
         permission_id=permission.permission_id,
         request_id=permission.request_id,
@@ -278,7 +285,6 @@ def create_late_entry_permission(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="Permission already exists for this request") from exc
-    db.refresh(permission)
     return permission
 
 
@@ -878,7 +884,7 @@ def approve_late_request(
     late_request.approved_by_user_id = staff.id
     late_request.decision_note = (payload or {}).get("decision_note") or "Approved"
 
-    permission = create_late_entry_permission(
+    create_late_entry_permission(
         late_request=late_request,
         approving_staff=staff,
         approver_role=staff.role,
@@ -886,7 +892,6 @@ def approve_late_request(
         valid_minutes=college.permission_validity_minutes,
     )
     db.refresh(late_request)
-    db.refresh(permission)
     return late_request
 
 
@@ -917,6 +922,136 @@ def reject_late_request(
     db.commit()
     db.refresh(late_request)
     return late_request
+
+
+@app.get(
+    "/students/late-requests/{request_id}",
+    response_model=StudentLateRequestStatusResponse,
+)
+def get_student_late_request_status(
+    request_id: int,
+    student: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StudentLateRequestStatusResponse:
+    if student.role != "student":
+        raise HTTPException(status_code=403, detail="Student access is required")
+
+    advisor = aliased(User)
+    hod = aliased(User)
+    approver = aliased(User)
+    row = db.execute(
+        select(LateRequest, advisor, hod, approver)
+        .outerjoin(advisor, advisor.id == LateRequest.advisor_user_id)
+        .outerjoin(hod, hod.id == LateRequest.hod_user_id)
+        .outerjoin(approver, approver.id == LateRequest.approved_by_user_id)
+        .where(LateRequest.id == request_id)
+    ).one_or_none()
+    if row is None or row[0].student_id != student.id:
+        raise HTTPException(status_code=404, detail="Late request not found")
+
+    late_request, assigned_advisor, assigned_hod, deciding_staff = row
+    return StudentLateRequestStatusResponse(
+        **LateRequestResponse.model_validate(late_request).model_dump(),
+        advisor_name=assigned_advisor.full_name if assigned_advisor else None,
+        hod_name=assigned_hod.full_name if assigned_hod else None,
+        approved_by_name=deciding_staff.full_name if deciding_staff else None,
+        approved_by_role=deciding_staff.role if deciding_staff else None,
+    )
+
+
+def build_late_request_history_query():
+    student = aliased(User)
+    department = aliased(Department)
+    advisor = aliased(User)
+    hod = aliased(User)
+    approver = aliased(User)
+    query = (
+        select(LateRequest, student, department, advisor, hod, approver)
+        .join(student, student.id == LateRequest.student_id)
+        .join(department, department.id == LateRequest.department_id)
+        .outerjoin(advisor, advisor.id == LateRequest.advisor_user_id)
+        .outerjoin(hod, hod.id == LateRequest.hod_user_id)
+        .outerjoin(approver, approver.id == LateRequest.approved_by_user_id)
+        .order_by(LateRequest.requested_at.desc())
+    )
+    return query, student
+
+
+def serialize_late_request_history(row) -> LateRequestHistoryResponse:
+    late_request, student, department, advisor, hod, approver = row
+    approved_by_role = approver.role if approver and approver.role in {"advisor", "hod"} else None
+    return LateRequestHistoryResponse(
+        id=late_request.id,
+        student_id=student.id,
+        student_name=student.full_name,
+        student_identifier=student.student_id,
+        register_number=student.register_number,
+        year=student.year,
+        section=student.section,
+        department_id=department.id,
+        department_code=department.code,
+        department_name=department.name,
+        advisor_name=advisor.full_name if advisor else None,
+        hod_name=hod.full_name if hod else None,
+        reason=late_request.reason,
+        status=late_request.status,
+        decision_note=late_request.decision_note,
+        requested_at=late_request.requested_at,
+        approved_at=late_request.approved_at,
+        approved_by_user_id=late_request.approved_by_user_id,
+        approved_by_name=approver.full_name if approver else None,
+        approved_by_role=approved_by_role,
+    )
+
+
+@app.get("/students/late-requests", response_model=list[LateRequestHistoryResponse])
+def list_student_late_request_history(
+    student: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[LateRequestHistoryResponse]:
+    if student.role != "student":
+        raise HTTPException(status_code=403, detail="Student access is required")
+    query, _student = build_late_request_history_query()
+    rows = db.execute(query.where(LateRequest.student_id == student.id)).all()
+    return [serialize_late_request_history(row) for row in rows]
+
+
+@app.get("/staff/late-requests/history", response_model=list[LateRequestHistoryResponse])
+def list_staff_late_request_history(
+    staff: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[LateRequestHistoryResponse]:
+    if staff.role not in {"advisor", "hod"}:
+        raise HTTPException(status_code=403, detail="Staff access is required")
+    if staff.department_id is None:
+        raise HTTPException(status_code=403, detail="Department assignment required")
+
+    query, _student = build_late_request_history_query()
+    query = query.where(LateRequest.department_id == staff.department_id)
+    if staff.role == "advisor":
+        query = query.where(LateRequest.advisor_user_id == staff.id)
+    else:
+        query = query.where(LateRequest.hod_user_id == staff.id)
+    rows = db.execute(query).all()
+    return [serialize_late_request_history(row) for row in rows]
+
+
+@app.get("/admin/late-requests", response_model=list[LateRequestHistoryResponse])
+def list_admin_late_request_history(
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[LateRequestHistoryResponse]:
+    college = get_college(db)
+    query, student = build_late_request_history_query()
+    rows = db.execute(query.where(student.college_id == college.id)).all()
+    entries = [serialize_late_request_history(row) for row in rows]
+    entries.sort(
+        key=lambda entry: (
+            department_display_key(entry.department_code),
+            -entry.requested_at.timestamp(),
+        )
+    )
+    return entries
 
 
 @app.get("/workspace/contacts", response_model=list[UserResponse])
@@ -1184,8 +1319,11 @@ def list_student_permissions(
         raise HTTPException(status_code=403, detail="Student access is required")
 
     now = datetime.now(timezone.utc)
-    permissions = db.scalars(
+    permission_rows = db.execute(
         select(LateEntryPermission)
+        .add_columns(User, Department)
+        .outerjoin(User, User.id == LateEntryPermission.approved_by_user_id)
+        .outerjoin(Department, Department.id == student.department_id)
         .where(
             LateEntryPermission.student_id == student.id,
             LateEntryPermission.status == "approved",
@@ -1193,7 +1331,10 @@ def list_student_permissions(
         )
         .order_by(LateEntryPermission.valid_until.desc())
     ).all()
-    return [serialize_late_entry_permission(db, permission) for permission in permissions]
+    return [
+        serialize_late_entry_permission(permission, student, approver, department)
+        for permission, approver, department in permission_rows
+    ]
 
 
 @app.get("/security/approved-students", response_model=list[LateEntryPermissionResponse])
@@ -1205,17 +1346,98 @@ def list_security_approved_students(
         raise HTTPException(status_code=403, detail="Security staff must belong to a college")
 
     now = datetime.now(timezone.utc)
-    permissions = db.scalars(
-        select(LateEntryPermission)
-        .join(User, User.id == LateEntryPermission.student_id)
+    student_account = aliased(User)
+    approver = aliased(User)
+    permission_rows = db.execute(
+        select(LateEntryPermission, student_account, approver, Department)
+        .join(student_account, student_account.id == LateEntryPermission.student_id)
+        .outerjoin(approver, approver.id == LateEntryPermission.approved_by_user_id)
+        .outerjoin(Department, Department.id == student_account.department_id)
         .where(
-            User.college_id == security.college_id,
+            student_account.college_id == security.college_id,
             LateEntryPermission.status == "approved",
             LateEntryPermission.valid_until > now,
         )
         .order_by(LateEntryPermission.valid_until.asc())
     ).all()
-    return [serialize_late_entry_permission(db, permission) for permission in permissions]
+    return [
+        serialize_late_entry_permission(permission, student, approver, department)
+        for permission, student, approver, department in permission_rows
+    ]
+
+
+def get_assigned_active_gate(security: User, db: Session) -> Gate:
+    if security.college_id is None or security.gate_id is None:
+        raise HTTPException(status_code=403, detail="Security staff must be assigned to a college gate")
+    gate = db.get(Gate, security.gate_id)
+    if gate is None or gate.college_id != security.college_id or not gate.is_active:
+        raise HTTPException(status_code=403, detail="An active assigned gate is required")
+    return gate
+
+
+@app.post("/security/permissions/{permission_id}/enter", response_model=GateEntryHistoryResponse)
+def confirm_gate_entry(
+    permission_id: str,
+    security: User = Depends(require_security),
+    db: Session = Depends(get_db),
+) -> GateEntryHistoryResponse:
+    gate = get_assigned_active_gate(security, db)
+    now = datetime.now(timezone.utc)
+    student_account = aliased(User)
+    permission_row = db.execute(
+        select(LateEntryPermission, student_account, Department)
+        .join(student_account, student_account.id == LateEntryPermission.student_id)
+        .outerjoin(Department, Department.id == student_account.department_id)
+        .where(
+            LateEntryPermission.permission_id == permission_id,
+            LateEntryPermission.status == "approved",
+            LateEntryPermission.valid_until > now,
+            student_account.college_id == security.college_id,
+        )
+        .with_for_update(of=LateEntryPermission)
+    ).one_or_none()
+    if permission_row is None:
+        raise HTTPException(status_code=409, detail="This approval is expired, already used, or unavailable")
+
+    permission, student, department = permission_row
+    event = GateEntryEvent(
+        permission_id=permission.permission_id,
+        student_id=student.id,
+        student_name=student.full_name,
+        register_number=student.register_number,
+        department_code=department.code if department else None,
+        gate_id=gate.id,
+        gate_code=gate.code,
+        gate_name=gate.name,
+        security_user_id=security.id,
+        security_name=security.full_name,
+        entered_at=now,
+    )
+    permission.status = "entered"
+    db.add(event)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This approval has already been recorded at the gate") from exc
+    db.refresh(event)
+    return event
+
+
+@app.get("/security/entry-history", response_model=list[GateEntryHistoryResponse])
+def list_security_entry_history(
+    security: User = Depends(require_security),
+    db: Session = Depends(get_db),
+) -> list[GateEntryEvent]:
+    gate = get_assigned_active_gate(security, db)
+    return list(
+        db.scalars(
+            select(GateEntryEvent)
+            .where(GateEntryEvent.gate_id == gate.id)
+            .order_by(GateEntryEvent.entered_at.desc())
+            .limit(100)
+        )
+    )
 
 
 @app.post("/admin/departments/{department_id}/hod", response_model=UserResponse, status_code=201)
@@ -1415,7 +1637,15 @@ def verify_student_qr(
             detail="The scanned value is not a valid department gate QR",
         ) from exc
 
-    qr = db.get(DepartmentGateQr, qr_payload.department_qr_id)
+    qr_record = db.execute(
+        select(DepartmentGateQr, Department, Gate)
+        .outerjoin(Department, Department.id == DepartmentGateQr.department_id)
+        .outerjoin(Gate, Gate.id == DepartmentGateQr.gate_id)
+        .where(DepartmentGateQr.id == qr_payload.department_qr_id)
+    ).one_or_none()
+    if qr_record is None:
+        raise HTTPException(status_code=404, detail="Department gate QR not found")
+    qr, department, gate = qr_record
     if qr is None or not secrets.compare_digest(qr_payload.secure_token, qr.secure_token):
         raise HTTPException(status_code=404, detail="Department gate QR not found")
     if qr_payload.gate_id != qr.gate_id:
@@ -1423,8 +1653,6 @@ def verify_student_qr(
     if qr.status != "active":
         raise HTTPException(status_code=410, detail="This department gate QR is disabled")
 
-    department = db.get(Department, qr.department_id)
-    gate = db.get(Gate, qr.gate_id)
     if department is None or gate is None or not gate.is_active:
         raise HTTPException(status_code=410, detail="This department gate QR is disabled")
     if user.college_id != department.college_id or user.department_id != department.id:
@@ -1491,6 +1719,8 @@ async def send_direct_message(
         )
     )
     if message is not None:
+        if message.sender_deleted_at is not None:
+            raise HTTPException(status_code=409, detail="This message was deleted from your inbox; send it again as a new message")
         if message.recipient_id != recipient.id or message.body != message_body:
             raise HTTPException(
                 status_code=409,
@@ -1547,7 +1777,10 @@ def list_direct_messages(
             select(DirectMessage)
             .where(
                 DirectMessage.id > after_id,
-                (DirectMessage.sender_id == user.id) | (DirectMessage.recipient_id == user.id),
+                or_(
+                    and_(DirectMessage.sender_id == user.id, DirectMessage.sender_deleted_at.is_(None)),
+                    and_(DirectMessage.recipient_id == user.id, DirectMessage.recipient_deleted_at.is_(None)),
+                ),
             )
             .order_by(DirectMessage.id)
             .limit(limit)
@@ -1558,6 +1791,31 @@ def list_direct_messages(
         items=[DirectMessageResponse.model_validate(message) for message in messages],
         next_cursor=next_cursor,
     )
+
+
+@app.delete("/messages/{message_id}", response_model=DirectMessageDeleteResponse)
+async def delete_direct_message(
+    message_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DirectMessageDeleteResponse:
+    message = db.scalar(
+        select(DirectMessage).where(
+            DirectMessage.id == message_id,
+            or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id),
+        )
+    )
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found in your inbox")
+
+    deleted_at = datetime.now(timezone.utc)
+    if message.sender_id == user.id:
+        message.sender_deleted_at = message.sender_deleted_at or deleted_at
+    else:
+        message.recipient_deleted_at = message.recipient_deleted_at or deleted_at
+    db.commit()
+    await realtime_manager.publish(user.id, {"type": "message.deleted", "message_id": message.id})
+    return DirectMessageDeleteResponse(ok=True, message_id=message.id)
 
 
 @app.post("/messages/{message_id}/ack", response_model=DirectMessageResponse)
@@ -1645,3 +1903,8 @@ async def messages_websocket(websocket: WebSocket, ticket: str = Query(min_lengt
                 await websocket.send_json({"type": "error", "detail": "Unsupported event"})
     except WebSocketDisconnect:
         realtime_manager.disconnect(user_id, websocket)
+
+
+FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend" / "student" / "dist"
+if FRONTEND_DIST_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
