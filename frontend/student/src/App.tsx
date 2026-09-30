@@ -13,6 +13,7 @@ import {
   GraduationCap,
   KeyRound,
   LogOut,
+  MoreVertical,
   QrCode,
   RefreshCw,
   RotateCcw,
@@ -63,6 +64,7 @@ function App() {
   const [statusRefreshError, setStatusRefreshError] = useState('')
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false)
   const [studentView, setStudentView] = useState<'checkin' | 'history'>('checkin')
+  const [isStudentMenuOpen, setIsStudentMenuOpen] = useState(false)
   const [studentHistory, setStudentHistory] = useState<LateRequestHistoryItem[]>([])
   const [studentHistoryLoading, setStudentHistoryLoading] = useState(false)
   const [studentHistoryError, setStudentHistoryError] = useState('')
@@ -247,6 +249,7 @@ function App() {
     setStatusRefreshError('')
     setIsConfirmed(false)
     setStudentView('checkin')
+    setIsStudentMenuOpen(false)
     setStudentHistory([])
     setStudentHistoryError('')
     setError('')
@@ -267,6 +270,18 @@ function App() {
           <div className="account-strip">
             <ProfileAvatar name={account.full_name} photoUrl={account.photo_url} size="small" />
             <span className="account-name">{account.full_name}</span>
+            {account.role === 'student' && <div className="student-menu-wrap" onKeyDown={(event) => { if (event.key === 'Escape') setIsStudentMenuOpen(false) }}>
+              <button className="icon-button" type="button" aria-label="Student menu" aria-expanded={isStudentMenuOpen} aria-controls="student-navigation-menu" title="Student menu" onClick={() => setIsStudentMenuOpen((open) => !open)}>
+                <MoreVertical size={18} />
+              </button>
+              {isStudentMenuOpen && <div id="student-navigation-menu" className="student-navigation-menu" role="group" aria-label="Student navigation">
+                {studentView === 'checkin' ? (
+                  <button className="student-navigation-item" type="button" onClick={() => { setStudentHistoryLoading(true); setStudentView('history'); setIsStudentMenuOpen(false) }}><Clock3 size={15} /> Late-entry history</button>
+                ) : (
+                  <button className="student-navigation-item" type="button" onClick={() => { setStudentView('checkin'); setIsStudentMenuOpen(false) }}><QrCode size={15} /> Check in</button>
+                )}
+              </div>}
+            </div>}
             <button className="icon-button" type="button" onClick={handleSignOut} title="Sign out" aria-label="Sign out">
               <LogOut size={17} />
             </button>
@@ -278,17 +293,6 @@ function App() {
 
       {account?.role === 'student' ? (
         <main className="content-area">
-          <nav className="student-view-tabs" aria-label="Student sections">
-            <button type="button" className={studentView === 'checkin' ? 'is-active' : ''} aria-pressed={studentView === 'checkin'} onClick={() => setStudentView('checkin')}>
-              <QrCode size={16} /> Check in
-            </button>
-            <button type="button" className={studentView === 'history' ? 'is-active' : ''} aria-pressed={studentView === 'history'} onClick={() => {
-              setStudentHistoryLoading(true)
-              setStudentView('history')
-            }}>
-              <Clock3 size={16} /> Late-entry history
-            </button>
-          </nav>
           {studentView === 'history' ? (
             <section className="student-history-panel">
               <div className="page-heading student-history-heading">
@@ -297,12 +301,15 @@ function App() {
                   <h1>Your request history<span className="title-period">.</span></h1>
                   <p className="page-intro">Review request reasons, status, assigned staff, and decisions.</p>
                 </div>
-                <button className="text-button" type="button" onClick={() => {
-                  setStudentHistoryLoading(true)
-                  setStudentHistoryRefreshKey((value) => value + 1)
-                }} disabled={studentHistoryLoading}>
-                  <RefreshCw size={16} /> {studentHistoryLoading ? 'Loading…' : 'Refresh'}
-                </button>
+                <div className="student-history-actions">
+                  <button className="text-button" type="button" onClick={() => setStudentView('checkin')}><QrCode size={16} /> Check in</button>
+                  <button className="text-button" type="button" onClick={() => {
+                    setStudentHistoryLoading(true)
+                    setStudentHistoryRefreshKey((value) => value + 1)
+                  }} disabled={studentHistoryLoading}>
+                    <RefreshCw size={16} /> {studentHistoryLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
               </div>
               {studentHistoryError && <p className="error-message" role="alert"><CircleAlert size={16} />{studentHistoryError}</p>}
               {studentHistoryLoading && studentHistory.length === 0

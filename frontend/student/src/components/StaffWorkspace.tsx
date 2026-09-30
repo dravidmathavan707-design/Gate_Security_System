@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { BadgeCheck, Check, CircleAlert, ClipboardCheck, Eye, EyeOff, RefreshCw, ShieldCheck } from 'lucide-react'
+import { BadgeCheck, Check, CircleAlert, ClipboardCheck, Clock3, Eye, EyeOff, House, MoreVertical, RefreshCw, ShieldCheck, UserPlus } from 'lucide-react'
 import {
   approveStaffLateRequest,
   createDepartmentQr,
@@ -41,6 +41,8 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
   const [notice, setNotice] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [showStudentForm, setShowStudentForm] = useState(false)
+  const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false)
+  const [activeView, setActiveView] = useState<'dashboard' | 'history'>('dashboard')
   const isHod = account.role === 'hod'
   const canReviewLateRequests = account.role === 'hod' || account.role === 'advisor'
 
@@ -68,6 +70,10 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
       })
     return () => { active = false }
   }, [canReviewLateRequests, isHod, refreshKey])
+
+  useEffect(() => {
+    if (showStudentForm && activeView === 'dashboard') document.getElementById('staff-student-form')?.scrollIntoView({ behavior: 'smooth' })
+  }, [activeView, showStudentForm])
 
   async function toggleQr(qr: DepartmentQr) {
     setIsBusy(true)
@@ -155,6 +161,29 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
           <p>{assignments?.department_name ?? 'Loading department assignment'} · {assignments?.classes.length ?? 0} assigned class sections</p>
         </div>
         <div className="workspace-welcome-actions">
+          <div className="workspace-quick-menu-wrap" onKeyDown={(event) => { if (event.key === 'Escape') setIsQuickMenuOpen(false) }}>
+            <button
+              className="workspace-quiet-button workspace-quick-menu-trigger"
+              type="button"
+              aria-label="Quick actions"
+              aria-expanded={isQuickMenuOpen}
+              aria-controls="staff-quick-actions"
+              title="Quick actions"
+              onClick={() => setIsQuickMenuOpen((open) => !open)}
+            >
+              <MoreVertical size={17} />
+            </button>
+            {isQuickMenuOpen && <div id="staff-quick-actions" className="workspace-quick-menu" role="group" aria-label="Quick actions">
+              {activeView === 'dashboard' ? (
+                <>
+                  <button className="workspace-quick-menu-item" type="button" onClick={() => { setActiveView('dashboard'); setIsQuickMenuOpen(false); setShowStudentForm(true) }}><UserPlus size={15} /> Add student</button>
+                  {canReviewLateRequests && <button className="workspace-quick-menu-item" type="button" onClick={() => { setActiveView('history'); setIsQuickMenuOpen(false) }}><Clock3 size={15} /> Late history</button>}
+                </>
+              ) : (
+                <button className="workspace-quick-menu-item" type="button" onClick={() => { setActiveView('dashboard'); setIsQuickMenuOpen(false) }}><House size={15} /> Dashboard</button>
+              )}
+            </div>}
+          </div>
           <button className="workspace-quiet-button" type="button" onClick={() => setRefreshKey((value) => value + 1)}><RefreshCw size={15} /> Refresh</button>
           <button className="workspace-quiet-button" type="button" onClick={onSignOut}><span>Sign out</span></button>
         </div>
@@ -163,6 +192,7 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
       {notice && <div className="workspace-notice"><Check size={15} />{notice}</div>}
       {error && <div className="workspace-alert"><CircleAlert size={15} />{error}</div>}
 
+      {activeView === 'dashboard' && <>
       <section className="workspace-stat-grid staff-stat-grid">
         <article><span>Role</span><b>{isHod ? 'Department HOD' : 'Class advisor'}</b><small>Verified by your account</small></article>
         <article><span>Department</span><b>{assignments?.department_code ?? '—'}</b><small>{assignments?.department_name ?? 'Loading'}</small></article>
@@ -207,11 +237,12 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
           </div>
         </div>
 
-        <div className="workspace-panel staff-student-panel">
-          <div className="workspace-section-heading"><div><span className="workspace-eyebrow">STUDENT ACCESS / CREATE ONLY</span><h2>Add a student</h2></div><ClipboardCheck size={18} /></div>
-          <div className="workspace-action-row"><p className="workspace-muted">{isHod ? 'Create students for your department classes.' : 'Create students only for your assigned class.'} Student deletion is available only to Admin.</p><button className="primary-button" type="button" onClick={() => setShowStudentForm((value) => !value)}>{showStudentForm ? 'Hide form' : 'Add student'}</button></div>
-          {showStudentForm ? (
-            <form className="workspace-form" onSubmit={handleCreateStudent}>
+      </section>
+
+      {showStudentForm && <section id="staff-student-form" className="workspace-panel staff-student-panel">
+          <div className="workspace-section-heading"><div><span className="workspace-eyebrow">STUDENT ACCESS / CREATE ONLY</span><h2>Add a student</h2></div><button className="workspace-quiet-button" type="button" onClick={() => setShowStudentForm(false)}>Close</button></div>
+          <p className="workspace-muted">{isHod ? 'Create students for your department classes.' : 'Create students only for your assigned class.'} Student deletion is available only to Admin.</p>
+          <form className="workspace-form" onSubmit={handleCreateStudent}>
               <label className="workspace-field"><span>Student full name</span><input name="full_name" required minLength={2} /></label>
               <label className="workspace-field"><span>Student email</span><input name="email" type="email" required /></label>
               <label className="workspace-field"><span>Temporary password</span><span className="auth-password-control"><input name="password" type={showPassword ? 'text' : 'password'} minLength={12} required /><button className="auth-password-toggle" type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword((visible) => !visible)}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></label>
@@ -220,12 +251,8 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
               <label className="workspace-field"><span>Parent name</span><input name="parent_name" /></label>
               <label className="workspace-field"><span>Parent phone</span><input name="parent_phone" /></label>
               <button className="primary-button" type="submit" disabled={isBusy}>{isBusy ? 'Creating…' : <>Create student <Check size={15} /></>}</button>
-            </form>
-          ) : (
-            <p className="workspace-muted" style={{ marginTop: '14px' }}>Use Add student to open the student form and create a new learner record.</p>
-          )}
-        </div>
-      </section>
+          </form>
+      </section>}
 
       {canReviewLateRequests && (
         <section className="workspace-panel late-approval-panel">
@@ -265,8 +292,15 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
         </section>
       )}
 
-      {canReviewLateRequests && (
-        <section className="workspace-panel late-history-panel">
+      <InboxPanel
+        account={account}
+        departmentLabels={assignments ? { [assignments.department_id]: `${assignments.department_code} · ${assignments.department_name}` } : {}}
+        gateLabels={Object.fromEntries(gates.map((gate) => [gate.id, gate.code]))}
+      />
+      </>}
+
+      {activeView === 'history' && canReviewLateRequests && (
+        <section id="staff-late-history" className="workspace-panel late-history-panel">
           <div className="workspace-section-heading">
             <div><span className="workspace-eyebrow">{isHod ? 'DEPARTMENT RECORDS' : 'ASSIGNED CLASS RECORDS'}</span><h2>Late-entry history</h2></div>
             <ClipboardCheck size={18} />
@@ -277,8 +311,6 @@ export function StaffWorkspace({ account, onSignOut }: StaffWorkspaceProps) {
           />
         </section>
       )}
-
-      <InboxPanel account={account} />
     </main>
   )
 }

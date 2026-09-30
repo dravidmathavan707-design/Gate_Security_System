@@ -518,7 +518,11 @@ export function AdminWorkspace({ account, onSignOut }: AdminWorkspaceProps) {
         </form>
       </section>}
 
-      <InboxPanel account={account} />
+      <InboxPanel
+        account={account}
+        departmentLabels={Object.fromEntries(departments.map((department) => [department.id, `${department.code} · ${department.name}`]))}
+        gateLabels={Object.fromEntries(gates.map((gate) => [gate.id, gate.code]))}
+      />
     </main>
   )
 }

@@ -143,6 +143,12 @@
   background: rgba(37, 64, 54, 0.86);
 }
 
+.student-menu-wrap { position: relative; }
+.student-navigation-menu { position: absolute; z-index: 30; top: calc(100% + 8px); right: 0; width: min(220px, calc(100vw - 24px)); padding: 5px; border: 1px solid rgba(190, 227, 207, 0.16); border-radius: 7px; background: #10231c; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3); }
+.student-navigation-item { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: #d5e4d8; border: 0; border-radius: 4px; background: transparent; cursor: pointer; font-size: 12px; text-align: left; }
+.student-navigation-item:hover { color: #f2f7f1; background: rgba(184, 228, 207, 0.09); }
+.student-navigation-item svg { flex: 0 0 auto; color: #b8e4cf; }
+
 .icon-button:active { transform: scale(0.94); transition-duration: 110ms; }
 
 .gateway-area {
@@ -1241,6 +1247,7 @@
 
 @media (max-width: 760px) {
   .topbar { height: 62px; padding: 0 18px; }
+  .topbar .icon-button { width: 44px; height: 44px; }
   .gateway-area { width: min(100% - 32px, 560px); padding-top: 27px; }
   .gateway-heading { margin-bottom: 22px; }
   .gateway-heading h1 { font-size: 43px; }
@@ -1551,6 +1558,13 @@
   align-items: center;
   gap: 8px;
 }
+
+.workspace-quick-menu-wrap { position: relative; }
+.workspace-quick-menu-trigger { width: 38px; padding: 0; }
+.workspace-quick-menu { position: absolute; z-index: 20; top: calc(100% + 7px); right: 0; width: min(210px, calc(100vw - 24px)); display: grid; gap: 3px; padding: 5px; border: 1px solid rgba(197, 231, 208, 0.16); border-radius: 7px; background: #10231c; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3); }
+.workspace-quick-menu-item { min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 11px; color: #d5e4d8; border: 0; border-radius: 4px; background: transparent; cursor: pointer; font-size: 12px; text-align: left; }
+.workspace-quick-menu-item:hover { color: #f2f7f1; background: rgba(184, 228, 207, 0.09); }
+.workspace-quick-menu-item svg { flex: 0 0 auto; color: #b8e4cf; }
 
 .workspace-tabs {
   position: relative;
@@ -2125,12 +2139,14 @@
 @media (max-width: 600px) {
   .workspace-area { width: calc(100% - 24px); padding-top: 24px; }
   .workspace-security-area { gap: 1rem; }
-  .workspace-welcome { align-items: flex-start; }
+  .workspace-welcome { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .workspace-welcome-actions { width: 100%; flex-wrap: wrap; }
   .workspace-welcome-copy { align-items: flex-start; gap: 10px; }
   .workspace-welcome-copy .profile-avatar { width: 42px; height: 42px; font-size: 14px; }
   .workspace-welcome h1 { font-size: 22px; }
   .workspace-welcome > .workspace-welcome-actions { gap: 5px; }
-  .workspace-welcome-actions .workspace-quiet-button { min-height: 34px; padding: 0 9px; font-size: 9px; }
+  .workspace-welcome-actions .workspace-quiet-button { min-height: 44px; padding: 0 9px; font-size: 9px; }
+  .workspace-welcome-actions .workspace-quick-menu-trigger { width: 44px; }
   .workspace-tabs button { min-height: 36px; padding: 0 11px; font-size: 10px; }
   .workspace-queue-item,
   .workspace-qr-item { padding: 0.8rem; }
@@ -2185,40 +2201,9 @@
   .workspace-form { gap: 10px; }
 }
 
-.student-view-tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  margin-bottom: 20px;
-  padding: 5px;
-  border: 1px solid rgba(197, 231, 208, 0.12);
-  border-radius: 8px;
-  background: rgba(8, 21, 17, 0.54);
-}
-
-.student-view-tabs button {
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 12px;
-  color: #9bb0a4;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  cursor: pointer;
-  font-size: 11px;
-}
-
-.student-view-tabs button.is-active {
-  color: #eaf4eb;
-  border-color: rgba(184, 228, 207, 0.15);
-  background: rgba(184, 228, 207, 0.09);
-}
-
 .student-history-panel { display: grid; gap: 14px; }
 .student-history-heading { align-items: center; margin-bottom: 0; }
+.student-history-actions { display: flex; align-items: center; gap: 10px; }
 .late-history-panel,
 .late-history-summary-panel { margin-top: 18px; }
 .late-history-list { display: grid; gap: 11px; }
@@ -2248,8 +2233,8 @@
 .workspace-tabs button { min-height: 44px; }
 
 @media (max-width: 600px) {
-  .student-view-tabs { margin-bottom: 15px; }
   .student-history-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .student-history-actions { flex-wrap: wrap; }
   .late-history-item { padding: 12px; }
   .late-history-heading { align-items: flex-start; }
   .late-history-status { max-width: 45%; text-align: center; }

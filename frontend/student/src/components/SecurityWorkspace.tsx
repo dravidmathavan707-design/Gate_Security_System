@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, CircleAlert, Clock3, DoorOpen, RefreshCw, ScanLine, ShieldCheck, UserCheck } from 'lucide-react'
+import { Check, CircleAlert, Clock3, DoorOpen, House, MoreVertical, RefreshCw, ScanLine, ShieldCheck, UserCheck } from 'lucide-react'
 import { confirmSecurityEntry, getSecurityApprovedStudents, getSecurityDepartmentQrs, getSecurityEntryHistory, type Account, type DepartmentQr, type GateEntryEvent, type LatePermission } from '../services/api'
 import { DepartmentQrPreview } from './DepartmentQrPreview'
 import { InboxPanel } from './InboxPanel'
@@ -15,11 +15,14 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
   const [entryHistory, setEntryHistory] = useState<GateEntryEvent[]>([])
   const [search, setSearch] = useState('')
   const [departmentFilter, setDepartmentFilter] = useState('all')
+  const [qrDepartmentFilter, setQrDepartmentFilter] = useState('all')
   const [selectedPermission, setSelectedPermission] = useState<LatePermission | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [copiedQrId, setCopiedQrId] = useState<number | null>(null)
   const [entryFeedback, setEntryFeedback] = useState('')
   const [isConfirmingEntry, setIsConfirmingEntry] = useState(false)
+  const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false)
+  const [activeView, setActiveView] = useState<'dashboard' | 'history'>('dashboard')
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -66,6 +69,13 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
   const departmentOptions = useMemo(
     () => ['all', ...new Set(orderedQrs.map((qr) => qr.department_code.toUpperCase()))],
     [orderedQrs],
+  )
+
+  const visibleQrs = useMemo(
+    () => qrDepartmentFilter === 'all'
+      ? orderedQrs
+      : orderedQrs.filter((qr) => qr.department_code.toUpperCase() === qrDepartmentFilter),
+    [orderedQrs, qrDepartmentFilter],
   )
 
   const visiblePermissions = useMemo(() => {
@@ -134,6 +144,26 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
           <p>{account.full_name} · Gate control dashboard</p>
         </div>
         <div className="workspace-welcome-actions">
+          <div className="workspace-quick-menu-wrap" onKeyDown={(event) => { if (event.key === 'Escape') setIsQuickMenuOpen(false) }}>
+            <button
+              className="workspace-quiet-button workspace-quick-menu-trigger"
+              type="button"
+              aria-label="Quick actions"
+              aria-expanded={isQuickMenuOpen}
+              aria-controls="security-quick-actions"
+              title="Quick actions"
+              onClick={() => setIsQuickMenuOpen((open) => !open)}
+            >
+              <MoreVertical size={17} />
+            </button>
+            {isQuickMenuOpen && <div id="security-quick-actions" className="workspace-quick-menu" role="group" aria-label="Quick actions">
+              {activeView === 'dashboard' ? (
+                <button className="workspace-quick-menu-item" type="button" onClick={() => { setActiveView('history'); setIsQuickMenuOpen(false) }}><Clock3 size={15} /> History</button>
+              ) : (
+                <button className="workspace-quick-menu-item" type="button" onClick={() => { setActiveView('dashboard'); setIsQuickMenuOpen(false) }}><House size={15} /> Dashboard</button>
+              )}
+            </div>}
+          </div>
           <button className="workspace-quiet-button" type="button" onClick={() => setRefreshKey((value) => value + 1)}><RefreshCw size={15} /> Refresh</button>
           <button className="workspace-quiet-button" type="button" onClick={onSignOut}><span>Sign out</span></button>
         </div>
@@ -142,6 +172,7 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
       {error && <div className="workspace-alert"><CircleAlert size={15} />{error}</div>}
       {entryFeedback && <div className="workspace-entry-feedback" role="status"><Check size={16} />{entryFeedback}</div>}
 
+      {activeView === 'dashboard' && <>
       <section className="workspace-stat-grid staff-stat-grid">
         <article><span>Approved</span><b>{stats.approved}</b><small>Ready for gate check</small></article>
         <article><span>Waiting</span><b>{stats.waiting}</b><small>Valid permissions</small></article>
@@ -231,8 +262,17 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
             <ScanLine size={18} />
           </div>
 
+          <label className="workspace-field">
+            <span>QR department</span>
+            <select value={qrDepartmentFilter} onChange={(event) => setQrDepartmentFilter(event.target.value)}>
+              {departmentOptions.map((item) => (
+                <option key={item} value={item}>{item === 'all' ? 'All departments' : item}</option>
+              ))}
+            </select>
+          </label>
+
           <div className="workspace-qr-grid">
-            {orderedQrs.map((qr) => (
+            {visibleQrs.map((qr) => (
               <article key={qr.id} className="workspace-qr-item">
                 <div className="workspace-qr-code-label">{qr.department_code}</div>
                 <DepartmentQrPreview value={qr.qr_payload} label={`${qr.department_code} ${qr.gate_name} QR`} size={92} />
@@ -252,7 +292,7 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
                 <span className={`workspace-qr-status ${qr.status === 'active' ? 'is-active' : 'is-quiet'}`}>{qr.status.toUpperCase()}</span>
               </article>
             ))}
-            {orderedQrs.length === 0 && <p className="workspace-muted">No department QR records are available for this gate.</p>}
+            {visibleQrs.length === 0 && <p className="workspace-muted">No department QR records are available for this gate.</p>}
           </div>
 
           <div className="workspace-authority-note"><ShieldCheck size={16} /><span>QR codes are created by admin or HOD and shown here in read-only, fixed department order.</span></div>
@@ -292,7 +332,9 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
         </section>
       )}
 
-      <section className="workspace-panel workspace-entry-history">
+      </>}
+
+      {activeView === 'history' && <section id="security-entry-history" className="workspace-panel workspace-entry-history">
         <div className="workspace-section-heading">
           <div>
             <span className="workspace-eyebrow">ENTRY HISTORY / {entryHistory.length} RECORDED</span>
@@ -323,9 +365,13 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
             ))}
           </div>
         )}
-      </section>
+      </section>}
 
-      <InboxPanel account={account} />
+      {activeView === 'dashboard' && <InboxPanel
+        account={account}
+        departmentLabels={Object.fromEntries(qrs.map((qr) => [qr.department_id, `${qr.department_code} · ${qr.department_name}`]))}
+        gateLabels={Object.fromEntries(qrs.map((qr) => [qr.gate_id, qr.gate_code]))}
+      />}
     </main>
   )
 }

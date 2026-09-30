@@ -5,29 +5,25 @@ import {
   connectRealtime,
   createRealtimeTicket,
   deleteMessage,
-  getDepartments,
-  getGates,
   getMessages,
   getWorkspaceContacts,
   sendMessage,
   type Account,
   type DirectMessage,
-  type Department,
-  type Gate,
 } from '../services/api'
 import { ProfileAvatar } from './ProfileAvatar'
 
 interface InboxPanelProps {
   account: Account
+  departmentLabels?: Record<number, string>
+  gateLabels?: Record<number, string>
 }
 
 type ConnectionState = 'connecting' | 'live' | 'reconnecting' | 'offline'
 
-export function InboxPanel({ account }: InboxPanelProps) {
+export function InboxPanel({ account, departmentLabels = {}, gateLabels = {} }: InboxPanelProps) {
   const [contacts, setContacts] = useState<Account[]>([])
   const [messages, setMessages] = useState<DirectMessage[]>([])
-  const [departmentMap, setDepartmentMap] = useState<Record<number, Department>>({})
-  const [gateMap, setGateMap] = useState<Record<number, Gate>>({})
   const [recipientId, setRecipientId] = useState('')
   const [body, setBody] = useState('')
   const [connection, setConnection] = useState<ConnectionState>('connecting')
@@ -47,28 +43,17 @@ export function InboxPanel({ account }: InboxPanelProps) {
     const roleLabel = formatRoleLabel(contact.role)
 
     if (contact.role === 'security') {
-      const gateText = contact.gate_assignment ?? (contact.gate_id ? gateMap[contact.gate_id]?.code ?? null : null)
+      const gateText = contact.gate_assignment ?? (contact.gate_id ? gateLabels[contact.gate_id] ?? null : null)
       return gateText ? `${roleLabel} · Gate ${gateText}` : roleLabel
     }
 
     const departmentText = contact.department_id
-      ? departmentMap[contact.department_id]
-        ? `${departmentMap[contact.department_id].code} · ${departmentMap[contact.department_id].name}`
-        : `Dept ${contact.department_id}`
+      ? departmentLabels[contact.department_id] ?? `Dept ${contact.department_id}`
       : null
 
     if (!departmentText) return roleLabel
     return `${roleLabel} · ${departmentText}`
   }
-
-  useEffect(() => {
-    Promise.all([getDepartments(), getGates()])
-      .then(([departments, gates]) => {
-        setDepartmentMap(Object.fromEntries(departments.map((department) => [department.id, department])))
-        setGateMap(Object.fromEntries(gates.map((gate) => [gate.id, gate])))
-      })
-      .catch(() => undefined)
-  }, [])
 
   useEffect(() => {
     let active = true
