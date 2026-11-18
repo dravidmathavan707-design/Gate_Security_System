@@ -1652,6 +1652,43 @@
   background: rgba(130, 56, 38, 0.13);
 }
 
+.workspace-connectivity-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(184, 228, 207, 0.18);
+  border-radius: 7px;
+  background: rgba(184, 228, 207, 0.06);
+  color: #c6e4cf;
+  font-size: 11px;
+}
+
+.workspace-connectivity-state.is-offline {
+  color: #ffe3a2;
+  border-color: rgba(255, 214, 128, 0.28);
+  background: rgba(130, 97, 38, 0.16);
+}
+
+.workspace-connectivity-state.is-expired {
+  color: #ffb29c;
+  border-color: rgba(242, 161, 125, 0.25);
+  background: rgba(130, 56, 38, 0.13);
+}
+
+.workspace-connectivity-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #62d59b;
+}
+
+.is-offline .workspace-connectivity-dot { background: #ffc85c; }
+.is-expired .workspace-connectivity-dot { background: #ff806b; }
+
 .workspace-notice {
   width: fit-content;
   max-width: 100%;

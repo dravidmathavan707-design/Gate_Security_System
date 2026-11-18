@@ -2,11 +2,14 @@ import os
 import tempfile
 import uuid
 import importlib
-from datetime import time
+from datetime import datetime, time, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from pwdlib import PasswordHash
 
 _test_database_directory = tempfile.TemporaryDirectory()
@@ -16,9 +19,10 @@ os.environ["JWT_SECRET"] = "test-secret-that-is-long-enough-for-hs256"
 from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
+from app import main as main_module
 from app.main import app
 from app.models import User
-from app.models import College, CollegeLogoAudit, Department, DepartmentGateQr, Gate, LateEntryPermission
+from app.models import College, CollegeLogoAudit, Department, DepartmentGateQr, Gate, LateEntryPermission, OfflineEntrySyncAttempt
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1229,3 +1233,120 @@ def test_role_workspace_data_and_contacts_are_scoped() -> None:
         assert {user["id"] for user in student_contacts.json()} == {
             onboarding["hod"]["id"], onboarding["advisor"]["id"]
         }
+
+
+def test_security_offline_snapshot_is_signed_and_sync_is_idempotent(tmp_path, monkeypatch) -> None:
+    with TestClient(app) as client:
+        _student_auth, student_headers, onboarding = provision_student(client)
+        request_response = client.post(
+            "/late-requests",
+            headers=student_headers,
+            json={"reason": "Train delay"},
+        )
+        assert request_response.status_code == 201
+        approved = client.post(
+            f"/staff/late-requests/{request_response.json()['id']}/approve",
+            headers=onboarding["advisor_headers"],
+            json={"decision_note": "Approved"},
+        )
+        assert approved.status_code == 200
+
+        security = client.post(
+            "/admin/security-staff",
+            headers=onboarding["admin_headers"],
+            json={
+                "email": f"security-offline-{uuid4().hex[:8]}@example.edu",
+                "full_name": "Offline Security",
+                "password": "offline-security-password",
+                "employee_id": f"SEC-OFFLINE-{uuid4().hex[:8]}",
+                "gate_id": onboarding["gate"]["id"],
+            },
+        )
+        assert security.status_code == 201
+        security_login = client.post(
+            "/auth/login",
+            json={"email": security.json()["email"], "password": "offline-security-password"},
+        )
+        security_headers = {"Authorization": f"Bearer {security_login.json()['access_token']}"}
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        private_key_path = tmp_path / "offline-private.pem"
+        private_key_path.write_bytes(
+            private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        monkeypatch.setattr(main_module, "OFFLINE_SIGNING_PRIVATE_KEY_FILE", str(private_key_path))
+
+        snapshot_response = client.get("/security/offline-snapshot", headers=security_headers)
+        assert snapshot_response.status_code == 200
+        snapshot = snapshot_response.json()
+        assert snapshot["grace_period_minutes"] == 30
+        assert len(snapshot["permissions"]) == 1
+        ticket = snapshot["permissions"][0]
+        claims = jwt.decode(
+            ticket["signed_token"],
+            private_key.public_key(),
+            algorithms=["RS256"],
+            audience="smartgate-offline-security",
+            issuer="smartgate",
+        )
+        assert claims["permission_id"] == ticket["permission"]["permission_id"]
+        assert claims["gate_id"] == onboarding["gate"]["id"]
+        jwt.decode(
+            snapshot["snapshot_token"],
+            private_key.public_key(),
+            algorithms=["RS256"],
+            audience="smartgate-offline-security",
+            issuer="smartgate",
+        )
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        client_event_id = str(uuid4())
+        sync_body = {
+            "entries": [{
+                "client_event_id": client_event_id,
+                "signed_token": ticket["signed_token"],
+                "verified_at": timestamp,
+                "entered_at": timestamp,
+            }],
+        }
+        synced = client.post(
+            "/security/offline-entries/sync",
+            headers=security_headers,
+            json=sync_body,
+        )
+        assert synced.status_code == 200
+        assert synced.json()[0]["status"] == "synced"
+        assert synced.json()[0]["event"]["verification_mode"] == "offline"
+        assert synced.json()[0]["event"]["client_event_id"] == client_event_id
+
+        retry = client.post(
+            "/security/offline-entries/sync",
+            headers=security_headers,
+            json=sync_body,
+        )
+        assert retry.status_code == 200
+        assert retry.json()[0]["status"] == "synced"
+        assert retry.json()[0]["event"]["id"] == synced.json()[0]["event"]["id"]
+
+        reused_permission = client.post(
+            "/security/offline-entries/sync",
+            headers=security_headers,
+            json={
+                "entries": [{
+                    **sync_body["entries"][0],
+                    "client_event_id": str(uuid4()),
+                }],
+            },
+        )
+        assert reused_permission.status_code == 200
+        assert reused_permission.json()[0]["status"] == "rejected"
+        assert reused_permission.json()[0]["reason"]
+
+        db = SessionLocal()
+        attempts = db.query(OfflineEntrySyncAttempt).order_by(OfflineEntrySyncAttempt.id).all()
+        assert [attempt.status for attempt in attempts] == ["synced", "rejected"]
+        db.close()

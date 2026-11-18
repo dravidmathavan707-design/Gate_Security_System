@@ -83,6 +83,13 @@ def upsert_user(db, values: dict[str, str], password_hash: PasswordHash, **assig
         legacy_email = values["email"].replace("@demo-smartgate.com", "@demo.smartgate.test")
         user = db.scalar(select(User).where(User.email == legacy_email))
     if user is None:
+        for field in ("employee_id", "student_id", "register_number"):
+            identifier = values.get(field)
+            if identifier:
+                user = db.scalar(select(User).where(getattr(User, field) == identifier))
+                if user is not None:
+                    break
+    if user is None:
         user = User(
             email=values["email"],
             full_name=values["name"],

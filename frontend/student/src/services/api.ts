@@ -13,6 +13,7 @@ const API_BASE_URL = (() => {
   return 'http://127.0.0.1:8000'
 })()
 const TOKEN_KEY = 'smartgate.access-token'
+const SESSION_USER_KEY = 'smartgate.session-user-id'
 
 export interface Account {
   id: number
@@ -165,6 +166,7 @@ export interface LatePermission {
   request_id: number
   student_id: number
   student_name: string | null
+  register_number: string | null
   department_id: number | null
   department_code: string | null
   department_name: string | null
@@ -190,6 +192,35 @@ export interface GateEntryEvent {
   security_user_id: number
   security_name: string
   entered_at: string
+  verification_mode: 'online' | 'offline'
+  client_event_id: string | null
+}
+
+export interface OfflinePermissionTicket {
+  permission: LatePermission
+  signed_token: string
+}
+
+export interface OfflineSecuritySnapshot {
+  issued_at: string
+  grace_period_minutes: number
+  public_key_pem: string
+  snapshot_token: string
+  permissions: OfflinePermissionTicket[]
+}
+
+export interface OfflineEntrySyncItem {
+  client_event_id: string
+  signed_token: string
+  verified_at: string
+  entered_at: string
+}
+
+export interface OfflineEntrySyncResult {
+  client_event_id: string
+  status: 'synced' | 'rejected'
+  reason: string | null
+  event: GateEntryEvent | null
 }
 
 export interface DirectMessage {
@@ -256,6 +287,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 function saveSession(auth: AuthResponse): Account {
   sessionStorage.setItem(TOKEN_KEY, auth.access_token)
+  sessionStorage.setItem(SESSION_USER_KEY, String(auth.user.id))
   return auth.user
 }
 
@@ -503,6 +535,18 @@ export async function getSecurityApprovedStudents(): Promise<LatePermission[]> {
   return request<LatePermission[]>('/security/approved-students', { headers: authHeaders() })
 }
 
+export async function getSecurityOfflineSnapshot(): Promise<OfflineSecuritySnapshot> {
+  return request<OfflineSecuritySnapshot>('/security/offline-snapshot', { headers: authHeaders() })
+}
+
+export async function syncSecurityOfflineEntries(entries: OfflineEntrySyncItem[]): Promise<OfflineEntrySyncResult[]> {
+  return request<OfflineEntrySyncResult[]>('/security/offline-entries/sync', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ entries }),
+  })
+}
+
 export async function confirmSecurityEntry(permissionId: string): Promise<GateEntryEvent> {
   return request<GateEntryEvent>(`/security/permissions/${encodeURIComponent(permissionId)}/enter`, {
     method: 'POST',
@@ -563,10 +607,20 @@ export function authHeaders(): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+export function rememberSessionUser(account: Account): void {
+  sessionStorage.setItem(SESSION_USER_KEY, String(account.id))
+}
+
+export function getSessionUserId(): number | null {
+  const value = Number(sessionStorage.getItem(SESSION_USER_KEY))
+  return Number.isInteger(value) && value > 0 ? value : null
+}
+
 export function hasSession(): boolean {
   return Boolean(sessionStorage.getItem(TOKEN_KEY))
 }
 
 export function clearSession(): void {
   sessionStorage.removeItem(TOKEN_KEY)
+  sessionStorage.removeItem(SESSION_USER_KEY)
 }

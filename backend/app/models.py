@@ -201,6 +201,7 @@ class GateEntryEvent(Base):
     __tablename__ = "gate_entry_events"
     __table_args__ = (
         UniqueConstraint("permission_id", name="uq_gate_entry_events_permission_id"),
+        UniqueConstraint("client_event_id", name="uq_gate_entry_events_client_event_id"),
         Index("ix_gate_entry_events_gate_entered", "gate_id", "entered_at"),
     )
 
@@ -218,6 +219,29 @@ class GateEntryEvent(Base):
     entered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+    verification_mode: Mapped[str] = mapped_column(String(16), default="online")
+    client_event_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class OfflineEntrySyncAttempt(Base):
+    __tablename__ = "offline_entry_sync_attempts"
+    __table_args__ = (
+        UniqueConstraint("client_event_id", name="uq_offline_entry_sync_attempts_client_event_id"),
+        Index("ix_offline_entry_sync_attempts_gate_synced", "gate_id", "synced_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_event_id: Mapped[str] = mapped_column(String(36))
+    permission_id: Mapped[str] = mapped_column(String(32))
+    security_user_id: Mapped[int] = mapped_column(Integer)
+    gate_id: Mapped[int] = mapped_column(Integer)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    status: Mapped[str] = mapped_column(String(16))
+    rejection_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class DirectMessage(Base):

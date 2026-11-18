@@ -6,6 +6,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -16,7 +18,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 from starlette.staticfiles import StaticFiles
 
-from .config import ACCESS_TOKEN_MINUTES, CORS_ORIGIN_REGEX, CORS_ORIGINS, JWT_ALGORITHM, JWT_SECRET
+from .config import (
+    ACCESS_TOKEN_MINUTES,
+    CORS_ORIGIN_REGEX,
+    CORS_ORIGINS,
+    JWT_ALGORITHM,
+    JWT_SECRET,
+    OFFLINE_GRACE_MINUTES,
+    OFFLINE_SIGNING_PRIVATE_KEY_FILE,
+)
 from .database import SessionLocal, get_db
 from .models import (
     ClassAdvisorAssignment,
@@ -29,6 +39,7 @@ from .models import (
     Gate,
     LateEntryPermission,
     LateRequest,
+    OfflineEntrySyncAttempt,
     RealtimeTicket,
     User,
 )
@@ -54,6 +65,10 @@ from .schemas import (
     GateCreate,
     GateResponse,
     LateEntryPermissionResponse,
+    OfflineEntrySyncRequest,
+    OfflineEntrySyncResult,
+    OfflineSecuritySnapshotResponse,
+    OfflinePermissionTicket,
     LateRequestCreate,
     LateRequestHistoryResponse,
     LateRequestResponse,
@@ -244,6 +259,7 @@ def serialize_late_entry_permission(
         request_id=permission.request_id,
         student_id=permission.student_id,
         student_name=student.full_name if student else None,
+        register_number=student.register_number if student else None,
         department_id=department.id if department else None,
         department_code=department.code if department else None,
         department_name=department.name if department else None,
@@ -1375,6 +1391,332 @@ def get_assigned_active_gate(security: User, db: Session) -> Gate:
     return gate
 
 
+def get_offline_signing_key() -> RSAPrivateKey:
+    if not OFFLINE_SIGNING_PRIVATE_KEY_FILE:
+        raise HTTPException(
+            status_code=503,
+            detail="Offline verification is not configured on this server",
+        )
+    try:
+        key_data = Path(OFFLINE_SIGNING_PRIVATE_KEY_FILE).read_bytes()
+        private_key = serialization.load_pem_private_key(key_data, password=None)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Offline verification signing key is unavailable",
+        ) from exc
+    if not isinstance(private_key, RSAPrivateKey):
+        raise HTTPException(
+            status_code=503,
+            detail="Offline verification requires an RSA signing key",
+        )
+    return private_key
+
+
+def normalize_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+@app.get("/security/offline-snapshot", response_model=OfflineSecuritySnapshotResponse)
+def create_security_offline_snapshot(
+    security: User = Depends(require_security),
+    db: Session = Depends(get_db),
+) -> OfflineSecuritySnapshotResponse:
+    gate = get_assigned_active_gate(security, db)
+    private_key = get_offline_signing_key()
+    now = datetime.now(timezone.utc)
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+
+    student_account = aliased(User)
+    approver = aliased(User)
+    permission_rows = db.execute(
+        select(LateEntryPermission, student_account, approver, Department)
+        .join(student_account, student_account.id == LateEntryPermission.student_id)
+        .outerjoin(approver, approver.id == LateEntryPermission.approved_by_user_id)
+        .outerjoin(Department, Department.id == student_account.department_id)
+        .where(
+            student_account.college_id == security.college_id,
+            LateEntryPermission.status == "approved",
+            LateEntryPermission.valid_until > now,
+        )
+        .order_by(LateEntryPermission.valid_until.asc())
+        .limit(500)
+    ).all()
+
+    tickets: list[OfflinePermissionTicket] = []
+    for permission, student, approving_staff, department in permission_rows:
+        offline_until = min(
+            normalize_utc(permission.valid_until),
+            now + timedelta(minutes=OFFLINE_GRACE_MINUTES),
+        )
+        claims = {
+            "iss": "smartgate",
+            "aud": "smartgate-offline-security",
+            "iat": int(now.timestamp()),
+            "exp": int(offline_until.timestamp()),
+            "permission_id": permission.permission_id,
+            "request_id": permission.request_id,
+            "student_id": student.id,
+            "student_name": student.full_name,
+            "register_number": student.register_number,
+            "department_id": department.id if department else None,
+            "department_code": department.code if department else None,
+            "department_name": department.name if department else None,
+            "approved_by_user_id": permission.approved_by_user_id,
+            "approver_name": approving_staff.full_name if approving_staff else None,
+            "approver_role": permission.approver_role,
+            "approved_at": int(normalize_utc(permission.approved_at).timestamp()),
+            "valid_from": int(normalize_utc(permission.valid_from).timestamp()),
+            "valid_until": int(normalize_utc(permission.valid_until).timestamp()),
+            "offline_until": int(offline_until.timestamp()),
+            "status": "approved",
+            "college_id": security.college_id,
+            "gate_id": gate.id,
+            "gate_code": gate.code,
+            "gate_name": gate.name,
+            "security_user_id": security.id,
+        }
+        tickets.append(
+            OfflinePermissionTicket(
+                permission=serialize_late_entry_permission(
+                    permission,
+                    student,
+                    approving_staff,
+                    department,
+                ),
+                signed_token=jwt.encode(claims, private_key, algorithm="RS256"),
+            )
+        )
+
+    return OfflineSecuritySnapshotResponse(
+        issued_at=now,
+        grace_period_minutes=OFFLINE_GRACE_MINUTES,
+        public_key_pem=public_key,
+        snapshot_token=jwt.encode(
+            {
+                "iss": "smartgate",
+                "aud": "smartgate-offline-security",
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(minutes=OFFLINE_GRACE_MINUTES)).timestamp()),
+                "college_id": security.college_id,
+                "gate_id": gate.id,
+                "security_name": security.full_name,
+                "role": "security",
+                "gate_code": gate.code,
+                "gate_name": gate.name,
+                "security_user_id": security.id,
+            },
+            private_key,
+            algorithm="RS256",
+        ),
+        permissions=tickets,
+    )
+
+
+@app.post(
+    "/security/offline-entries/sync",
+    response_model=list[OfflineEntrySyncResult],
+)
+def sync_security_offline_entries(
+    payload: OfflineEntrySyncRequest,
+    security: User = Depends(require_security),
+    db: Session = Depends(get_db),
+) -> list[OfflineEntrySyncResult]:
+    gate = get_assigned_active_gate(security, db)
+    private_key = get_offline_signing_key()
+    public_key = private_key.public_key()
+    now = datetime.now(timezone.utc)
+    results: list[OfflineEntrySyncResult] = []
+
+    for offline_entry in payload.entries:
+        client_event_id = str(offline_entry.client_event_id)
+        previous_attempt = db.scalar(
+            select(OfflineEntrySyncAttempt).where(
+                OfflineEntrySyncAttempt.client_event_id == client_event_id
+            )
+        )
+        if previous_attempt is not None:
+            if previous_attempt.security_user_id != security.id:
+                results.append(
+                    OfflineEntrySyncResult(
+                        client_event_id=offline_entry.client_event_id,
+                        status="rejected",
+                        reason="This offline event was already synchronized by another account.",
+                    )
+                )
+                continue
+            existing_event = db.scalar(
+                select(GateEntryEvent).where(
+                    GateEntryEvent.client_event_id == client_event_id
+                )
+            )
+            results.append(
+                OfflineEntrySyncResult(
+                    client_event_id=offline_entry.client_event_id,
+                    status=previous_attempt.status,
+                    reason=previous_attempt.rejection_reason,
+                    event=GateEntryHistoryResponse.model_validate(existing_event)
+                    if existing_event is not None
+                    else None,
+                )
+            )
+            continue
+
+        claims: dict[str, object] | None = None
+        try:
+            claims = jwt.decode(
+                offline_entry.signed_token,
+                public_key,
+                algorithms=["RS256"],
+                audience="smartgate-offline-security",
+                issuer="smartgate",
+                options={"verify_exp": False},
+            )
+        except jwt.InvalidTokenError:
+            claims = None
+
+        permission_id = str(claims.get("permission_id", "")) if claims else ""
+        rejection_reason: str | None = None
+        event: GateEntryEvent | None = None
+        verified_at = normalize_utc(offline_entry.verified_at)
+        entered_at = normalize_utc(offline_entry.entered_at)
+
+        if claims is None:
+            rejection_reason = "The offline permission signature is invalid."
+        else:
+            try:
+                issued_at = datetime.fromtimestamp(int(claims["iat"]), timezone.utc)
+                valid_from = datetime.fromtimestamp(int(claims["valid_from"]), timezone.utc)
+                valid_until = datetime.fromtimestamp(int(claims["valid_until"]), timezone.utc)
+                offline_until = datetime.fromtimestamp(int(claims["offline_until"]), timezone.utc)
+                token_student_id = int(claims["student_id"])
+                token_request_id = int(claims["request_id"])
+            except (KeyError, TypeError, ValueError, OSError, OverflowError):
+                rejection_reason = "The signed offline permission is incomplete."
+            else:
+                if (
+                    claims.get("status") != "approved"
+                    or claims.get("college_id") != security.college_id
+                    or claims.get("gate_id") != gate.id
+                    or claims.get("security_user_id") != security.id
+                ):
+                    rejection_reason = "This permission is not assigned to this security account and gate."
+                elif (
+                    verified_at > entered_at
+                    or verified_at < issued_at - timedelta(minutes=2)
+                    or verified_at < valid_from
+                    or entered_at > min(valid_until, offline_until)
+                    or entered_at > now + timedelta(minutes=2)
+                ):
+                    rejection_reason = "The offline verification time is outside its signed validity window."
+                else:
+                    permission_row = db.execute(
+                        select(LateEntryPermission, User, Department)
+                        .join(User, User.id == LateEntryPermission.student_id)
+                        .outerjoin(Department, Department.id == User.department_id)
+                        .where(
+                            LateEntryPermission.permission_id == permission_id,
+                            LateEntryPermission.request_id == token_request_id,
+                            LateEntryPermission.student_id == token_student_id,
+                            User.college_id == security.college_id,
+                        )
+                    ).one_or_none()
+                    if permission_row is None:
+                        rejection_reason = "The permission no longer exists in this college."
+                    else:
+                        permission, student, department = permission_row
+                        if permission.status != "approved":
+                            rejection_reason = "The permission was revoked, used, or is no longer approved."
+                        elif (
+                            int(normalize_utc(permission.valid_until).timestamp())
+                            != int(claims["valid_until"])
+                        ):
+                            rejection_reason = "The permission validity has changed since the last sync."
+                        elif db.scalar(
+                            select(GateEntryEvent.id).where(
+                                GateEntryEvent.permission_id == permission_id
+                            )
+                        ) is not None:
+                            rejection_reason = "This permission has already been recorded at a gate."
+                        else:
+                            event = GateEntryEvent(
+                                permission_id=permission.permission_id,
+                                student_id=student.id,
+                                student_name=student.full_name,
+                                register_number=student.register_number,
+                                department_code=department.code if department else None,
+                                gate_id=gate.id,
+                                gate_code=gate.code,
+                                gate_name=gate.name,
+                                security_user_id=security.id,
+                                security_name=security.full_name,
+                                entered_at=entered_at,
+                                verification_mode="offline",
+                                client_event_id=client_event_id,
+                            )
+                            permission.status = "entered"
+                            db.add(event)
+
+        attempt = OfflineEntrySyncAttempt(
+            client_event_id=client_event_id,
+            permission_id=permission_id or "invalid",
+            security_user_id=security.id,
+            gate_id=gate.id,
+            verified_at=verified_at,
+            entered_at=entered_at,
+            status="synced" if rejection_reason is None else "rejected",
+            rejection_reason=rejection_reason,
+        )
+        db.add(attempt)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            rejection_reason = "This permission or offline event has already been recorded."
+            attempt = OfflineEntrySyncAttempt(
+                client_event_id=client_event_id,
+                permission_id=permission_id or "invalid",
+                security_user_id=security.id,
+                gate_id=gate.id,
+                verified_at=verified_at,
+                entered_at=entered_at,
+                status="rejected",
+                rejection_reason=rejection_reason,
+            )
+            db.add(attempt)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                results.append(
+                    OfflineEntrySyncResult(
+                        client_event_id=offline_entry.client_event_id,
+                        status="rejected",
+                        reason=rejection_reason,
+                    )
+                )
+                continue
+
+        if rejection_reason is None and event is not None:
+            db.refresh(event)
+        results.append(
+            OfflineEntrySyncResult(
+                client_event_id=offline_entry.client_event_id,
+                status="synced" if rejection_reason is None else "rejected",
+                reason=rejection_reason,
+                event=GateEntryHistoryResponse.model_validate(event)
+                if rejection_reason is None and event is not None
+                else None,
+            )
+        )
+    return results
+
+
 @app.post("/security/permissions/{permission_id}/enter", response_model=GateEntryHistoryResponse)
 def confirm_gate_entry(
     permission_id: str,
@@ -1412,6 +1754,7 @@ def confirm_gate_entry(
         security_user_id=security.id,
         security_name=security.full_name,
         entered_at=now,
+        verification_mode="online",
     )
     permission.status = "entered"
     db.add(event)

@@ -21,13 +21,14 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import './App.css'
-import { clearSession, getCollegeBranding, getCurrentUser, getStudentLateRequest, getStudentLateRequestHistory, hasSession, login, resolvePhotoUrl, submitLateEntryRequest, verifyDepartmentQr, type Account, type CollegeBranding, type LateRequest, type LateRequestHistoryItem, type StudentVerification } from './services/api'
+import { clearSession, getCollegeBranding, getCurrentUser, getStudentLateRequest, getStudentLateRequestHistory, hasSession, login, rememberSessionUser, resolvePhotoUrl, submitLateEntryRequest, verifyDepartmentQr, type Account, type CollegeBranding, type LateRequest, type LateRequestHistoryItem, type StudentVerification } from './services/api'
 import { AdminWorkspace } from './components/AdminWorkspace'
 import { SecurityWorkspace } from './components/SecurityWorkspace'
 import { StaffWorkspace } from './components/StaffWorkspace'
 import { SuperAdminWorkspace } from './components/SuperAdminWorkspace'
 import { LateRequestHistoryList } from './components/LateRequestHistoryList'
 import { ProfileAvatar } from './components/ProfileAvatar'
+import { restoreOfflineSecurityAccount } from './services/offlineSecurity'
 const QRScanner = lazy(() => import('./components/QRScanner').then(({ QRScanner: Scanner }) => ({ default: Scanner })))
 
 type PortalRole = 'student' | 'staff' | 'security' | 'admin'
@@ -86,11 +87,32 @@ function App() {
     getCurrentUser()
       .then((currentUser) => {
         if (active) {
+          rememberSessionUser(currentUser)
           setAccount(currentUser)
           setSelectedRole(portalForRole(currentUser.role))
         }
       })
-      .catch(() => clearSession())
+      .catch(async (requestError: unknown) => {
+        if (!active) return
+        if (!navigator.onLine || requestError instanceof TypeError) {
+          try {
+            const offlineAccount = await restoreOfflineSecurityAccount()
+            if (active && offlineAccount) {
+              setAccount(offlineAccount)
+              setSelectedRole(portalForRole(offlineAccount.role))
+              setError('')
+            } else if (active) {
+              setError('SMARTGATE is unreachable and no valid offline security session is available.')
+            }
+          } catch (offlineError) {
+            if (active) {
+              setError(offlineError instanceof Error ? offlineError.message : 'Could not restore the offline security session.')
+            }
+          }
+          return
+        }
+        clearSession()
+      })
       .finally(() => {
         if (active) setIsRestoring(false)
       })

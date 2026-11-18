@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, CircleAlert, Clock3, DoorOpen, House, MoreVertical, RefreshCw, ScanLine, ShieldCheck, UserCheck } from 'lucide-react'
-import { confirmSecurityEntry, getSecurityApprovedStudents, getSecurityDepartmentQrs, getSecurityEntryHistory, type Account, type DepartmentQr, type GateEntryEvent, type LatePermission } from '../services/api'
+import { confirmSecurityEntry, getSecurityApprovedStudents, getSecurityDepartmentQrs, getSecurityEntryHistory, getSecurityOfflineSnapshot, syncSecurityOfflineEntries, type Account, type DepartmentQr, type GateEntryEvent, type LatePermission, type OfflineEntrySyncItem, type OfflineSecuritySnapshot } from '../services/api'
+import { loadOfflineCache, offlineEntryEvent, saveOfflineCache, verifyCachedPermission, verifyOfflineSnapshot, type OfflineCache } from '../services/offlineSecurity'
 import { DepartmentQrPreview } from './DepartmentQrPreview'
 import { InboxPanel } from './InboxPanel'
 
@@ -24,27 +25,155 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
   const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false)
   const [activeView, setActiveView] = useState<'dashboard' | 'history'>('dashboard')
   const [error, setError] = useState('')
+  const [offlineWarning, setOfflineWarning] = useState('')
+  const [connectionMode, setConnectionMode] = useState<'online' | 'offline' | 'expired'>('online')
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(null)
+  const [pendingSyncCount, setPendingSyncCount] = useState(0)
 
   useEffect(() => {
     let active = true
-    Promise.all([
-      getSecurityDepartmentQrs(),
-      getSecurityApprovedStudents(),
-      getSecurityEntryHistory(),
-    ])
-      .then(([items, queue, history]) => {
+    const isNetworkFailure = (requestError: unknown) => !navigator.onLine || requestError instanceof TypeError
+    const loadWorkspace = async () => {
+      let cache: OfflineCache | null = null
+      try {
+        cache = loadOfflineCache(account.id)
+        const [items, queue, history] = await Promise.all([
+          getSecurityDepartmentQrs(),
+          getSecurityApprovedStudents(),
+          getSecurityEntryHistory(),
+        ])
+        let snapshot: OfflineSecuritySnapshot | null = null
+        let snapshotQueue: LatePermission[] = []
+        let warning = ''
+        try {
+          const receivedSnapshot = await getSecurityOfflineSnapshot()
+          snapshotQueue = await verifyOfflineSnapshot(receivedSnapshot, account)
+          snapshot = receivedSnapshot
+        } catch (snapshotError) {
+          warning = snapshotError instanceof Error
+            ? snapshotError.message
+            : 'Offline verification is not configured for this device.'
+        }
+
+        const attemptedPermissionIds = new Set<string>()
+        const syncedEvents: GateEntryEvent[] = []
+        if (snapshot) {
+          const nextCache: OfflineCache = {
+            snapshot,
+            pending: cache?.pending ?? [],
+            rejected: cache?.rejected ?? [],
+          }
+          if (nextCache.pending.length > 0) {
+            try {
+              const payload: OfflineEntrySyncItem[] = nextCache.pending.map(
+                ({ client_event_id, signed_token, verified_at, entered_at }) => ({
+                  client_event_id,
+                  signed_token,
+                  verified_at,
+                  entered_at,
+                }),
+              )
+              const results = await syncSecurityOfflineEntries(payload)
+              const resultsById = new Map(results.map((result) => [result.client_event_id, result]))
+              const pendingEntries = nextCache.pending.filter((entry) => !resultsById.has(entry.client_event_id))
+              const rejectedEntries = [...nextCache.rejected]
+              for (const entry of nextCache.pending) {
+                const result = resultsById.get(entry.client_event_id)
+                if (!result) continue
+                attemptedPermissionIds.add(entry.event.permission_id)
+                if (result.status === 'synced' && result.event) {
+                  syncedEvents.push(result.event)
+                } else {
+                  rejectedEntries.push({
+                    ...entry,
+                    reason: result.reason ?? 'The server rejected this offline entry. Contact an administrator.',
+                  })
+                }
+              }
+              nextCache.pending = pendingEntries
+              nextCache.rejected = rejectedEntries
+            } catch (syncError) {
+              if (!isNetworkFailure(syncError)) {
+                warning = syncError instanceof Error ? syncError.message : 'Offline entries could not be synchronized.'
+              }
+            }
+          }
+          cache = nextCache
+          saveOfflineCache(account.id, cache)
+          setLastSyncAt(snapshot.issued_at)
+        } else if (cache) {
+          setLastSyncAt(cache.snapshot.issued_at)
+        }
+
+        for (const entry of [...(cache?.pending ?? []), ...(cache?.rejected ?? [])]) {
+          attemptedPermissionIds.add(entry.event.permission_id)
+        }
+        const availableQueue = snapshot ? snapshotQueue : queue
+        const nextPermissions = availableQueue.filter((permission) => !attemptedPermissionIds.has(permission.permission_id))
+        const localEvents = [...(cache?.pending ?? []), ...(cache?.rejected ?? [])].map((entry) => entry.event)
+        const mergedHistory = [...syncedEvents, ...localEvents, ...history]
+        const uniqueHistory = mergedHistory.filter((event, index, all) =>
+          all.findIndex((candidate) => candidate.client_event_id
+            ? candidate.client_event_id === event.client_event_id
+            : candidate.id === event.id) === index,
+        )
         if (active) {
           setQrs(items)
-          setPermissions(queue)
-          setEntryHistory(history)
-          setSelectedPermission((current) => current && queue.some((permission) => permission.permission_id === current.permission_id) ? current : null)
+          setPermissions(nextPermissions)
+          setEntryHistory(uniqueHistory)
+          setSelectedPermission((current) => current && nextPermissions.some((permission) => permission.permission_id === current.permission_id) ? current : null)
+          setConnectionMode('online')
+          setPendingSyncCount((cache?.pending.length ?? 0) + (cache?.rejected.length ?? 0))
+          setOfflineWarning(warning)
+          setError('')
         }
-      })
-      .catch((requestError: unknown) => {
-        if (active) setError(requestError instanceof Error ? requestError.message : 'Could not load the assigned gate directory.')
-      })
-    return () => { active = false }
-  }, [refreshKey])
+      } catch (requestError) {
+        if (!active) return
+        if (isNetworkFailure(requestError)) {
+          try {
+            cache = loadOfflineCache(account.id)
+            if (!cache) throw new Error('No signed offline cache is available. Reconnect before verifying any permissions.')
+            const cachedPermissions = await verifyOfflineSnapshot(cache.snapshot, account)
+            const usedPermissionIds = new Set([
+              ...cache.pending.map((entry) => entry.event.permission_id),
+              ...cache.rejected.map((entry) => entry.event.permission_id),
+            ])
+            const validPermissions = cachedPermissions.filter(
+              (permission) => !usedPermissionIds.has(permission.permission_id),
+            )
+            setPermissions(validPermissions)
+            setEntryHistory([
+              ...cache.rejected.map((entry) => entry.event),
+              ...cache.pending.map((entry) => entry.event),
+            ])
+            setConnectionMode('offline')
+            setLastSyncAt(cache.snapshot.issued_at)
+            setPendingSyncCount(cache.pending.length + cache.rejected.length)
+            setOfflineWarning('')
+            setError('')
+            setSelectedPermission((current) => current && validPermissions.some((permission) => permission.permission_id === current.permission_id) ? current : null)
+          } catch (cacheError) {
+            setPermissions([])
+            setConnectionMode('expired')
+            setLastSyncAt(cache?.snapshot.issued_at ?? null)
+            setPendingSyncCount((cache?.pending.length ?? 0) + (cache?.rejected.length ?? 0))
+            setError(cacheError instanceof Error ? cacheError.message : 'Offline verification is unavailable.')
+          }
+        } else {
+          setError(requestError instanceof Error ? requestError.message : 'Could not load the assigned gate directory.')
+        }
+      }
+    }
+    void loadWorkspace()
+    const refreshWhenOnline = () => setRefreshKey((value) => value + 1)
+    window.addEventListener('online', refreshWhenOnline)
+    window.addEventListener('offline', refreshWhenOnline)
+    return () => {
+      active = false
+      window.removeEventListener('online', refreshWhenOnline)
+      window.removeEventListener('offline', refreshWhenOnline)
+    }
+  }, [account, refreshKey])
 
   const orderedQrs = useMemo(() => {
     const departmentOrder: Record<string, number> = {
@@ -113,6 +242,38 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
     setError('')
     setEntryFeedback('')
     try {
+      if (connectionMode === 'expired') {
+        throw new Error('Offline verification has expired. Reconnect and synchronize before allowing another entry.')
+      }
+      if (connectionMode === 'offline') {
+        const cache = loadOfflineCache(account.id)
+        if (!cache) throw new Error('No signed offline cache is available. Reconnect before verifying any permissions.')
+        const verified = await verifyCachedPermission(cache.snapshot, permission.permission_id, account)
+        const timestamp = new Date().toISOString()
+        const clientEventId = crypto.randomUUID()
+        const event = offlineEntryEvent(
+          verified.permission,
+          account,
+          clientEventId,
+          timestamp,
+          verified.signedToken,
+        )
+        const queuedEntry = {
+          client_event_id: clientEventId,
+          signed_token: verified.signedToken,
+          verified_at: timestamp,
+          entered_at: timestamp,
+          event,
+        }
+        cache.pending.push(queuedEntry)
+        saveOfflineCache(account.id, cache)
+        setEntryHistory((current) => [event, ...current])
+        setPermissions((current) => current.filter((item) => item.permission_id !== permission.permission_id))
+        setPendingSyncCount((count) => count + 1)
+        setSelectedPermission(null)
+        setEntryFeedback(`${event.student_name} recorded locally in OFFLINE mode. It will sync when the connection returns.`)
+        return
+      }
       const event = await confirmSecurityEntry(permission.permission_id)
       setEntryHistory((current) => [event, ...current.filter((item) => item.id !== event.id)])
       setPermissions((current) => current.filter((item) => item.permission_id !== permission.permission_id))
@@ -170,6 +331,17 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
       </header>
 
       {error && <div className="workspace-alert"><CircleAlert size={15} />{error}</div>}
+      <div className={`workspace-connectivity-state is-${connectionMode}`} role="status">
+        <span className="workspace-connectivity-dot" />
+        <strong>{connectionMode === 'online' ? 'ONLINE' : connectionMode === 'offline' ? 'OFFLINE MODE' : 'OFFLINE EXPIRED'}</strong>
+        <span>{connectionMode === 'online'
+          ? `Server verification active${lastSyncAt ? ` · cache synced ${new Date(lastSyncAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`
+          : connectionMode === 'offline'
+            ? `Using signed permissions${lastSyncAt ? ` · last sync ${new Date(lastSyncAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`
+            : 'Offline grace period expired; new entry verification is blocked.'}</span>
+        {pendingSyncCount > 0 && <span>{pendingSyncCount} offline record{pendingSyncCount === 1 ? '' : 's'} awaiting sync/review</span>}
+      </div>
+      {offlineWarning && connectionMode === 'online' && <div className="workspace-notice"><CircleAlert size={14} />{offlineWarning}</div>}
       {entryFeedback && <div className="workspace-entry-feedback" role="status"><Check size={16} />{entryFeedback}</div>}
 
       {activeView === 'dashboard' && <>
@@ -184,7 +356,7 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
         <div className="workspace-panel workspace-queue-panel">
           <div className="workspace-section-heading">
             <div>
-              <span className="workspace-eyebrow">APPROVED STUDENTS / LIVE</span>
+              <span className="workspace-eyebrow">APPROVED STUDENTS / {connectionMode === 'online' ? 'LIVE' : 'SIGNED CACHE'}</span>
               <h2>{visiblePermissions.length} waiting at gate</h2>
             </div>
             <DoorOpen size={18} />
@@ -323,8 +495,8 @@ export function SecurityWorkspace({ account, onSignOut }: SecurityWorkspaceProps
               </div>
               <div className="workspace-entry-actions">
                 <button type="button" className="workspace-quiet-button" onClick={handleCancelEntry} disabled={isConfirmingEntry}>Cancel</button>
-                <button type="button" className="primary-button" onClick={() => void handleConfirmEntry(currentPermission)} disabled={isConfirmingEntry}>
-                  <Check size={15} /> {isConfirmingEntry ? 'Recording…' : 'Inside gate'}
+                <button type="button" className="primary-button" onClick={() => void handleConfirmEntry(currentPermission)} disabled={isConfirmingEntry || connectionMode === 'expired'}>
+                  <Check size={15} /> {isConfirmingEntry ? 'Recording…' : connectionMode === 'offline' ? 'Record offline entry' : 'Inside gate'}
                 </button>
               </div>
             </div>

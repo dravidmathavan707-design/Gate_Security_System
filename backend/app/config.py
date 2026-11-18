@@ -12,6 +12,10 @@ if len(JWT_SECRET) < 32 or JWT_SECRET.lower().startswith(("replace-with-", "deve
 	raise RuntimeError("Set JWT_SECRET in backend/.env to a unique random value of at least 32 characters.")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_MINUTES = 60
+OFFLINE_SIGNING_PRIVATE_KEY_FILE = os.getenv("OFFLINE_SIGNING_PRIVATE_KEY_FILE", "").strip()
+OFFLINE_GRACE_MINUTES = int(os.getenv("OFFLINE_GRACE_MINUTES", "30"))
+if not 1 <= OFFLINE_GRACE_MINUTES <= 60:
+    raise RuntimeError("OFFLINE_GRACE_MINUTES must be between 1 and 60.")
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",

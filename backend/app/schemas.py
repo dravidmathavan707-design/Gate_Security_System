@@ -271,6 +271,7 @@ class LateEntryPermissionResponse(BaseModel):
     request_id: int
     student_id: int
     student_name: str | None = None
+    register_number: str | None = None
     department_id: int | None = None
     department_code: str | None = None
     department_name: str | None = None
@@ -281,6 +282,19 @@ class LateEntryPermissionResponse(BaseModel):
     valid_from: datetime
     valid_until: datetime
     status: str
+
+
+class OfflinePermissionTicket(BaseModel):
+    permission: LateEntryPermissionResponse
+    signed_token: str
+
+
+class OfflineSecuritySnapshotResponse(BaseModel):
+    issued_at: datetime
+    grace_period_minutes: int
+    public_key_pem: str
+    snapshot_token: str
+    permissions: list[OfflinePermissionTicket]
 
 
 class GateEntryHistoryResponse(BaseModel):
@@ -298,6 +312,26 @@ class GateEntryHistoryResponse(BaseModel):
     security_user_id: int
     security_name: str
     entered_at: datetime
+    verification_mode: Literal["online", "offline"] = "online"
+    client_event_id: str | None = None
+
+
+class OfflineEntrySyncItem(BaseModel):
+    client_event_id: UUID
+    signed_token: str = Field(min_length=1, max_length=4096)
+    verified_at: datetime
+    entered_at: datetime
+
+
+class OfflineEntrySyncRequest(BaseModel):
+    entries: list[OfflineEntrySyncItem] = Field(max_length=100)
+
+
+class OfflineEntrySyncResult(BaseModel):
+    client_event_id: UUID
+    status: Literal["synced", "rejected"]
+    reason: str | None = None
+    event: GateEntryHistoryResponse | None = None
 
 
 class AuthResponse(BaseModel):

@@ -4,9 +4,9 @@ SMARTGATE is a late-entry authorization system for students, advisors, and campu
 
 ## Current status
 
-The implemented foundation includes a CLI-bootstrapped super admin, college profile and configurable rules, departments, HOD/advisor/security/student provisioning, automatic class-advisor assignment, gate records, and admin/HOD-controlled fixed department QR codes. Public registration is disabled. Students sign in with college-issued accounts, scan their department's active gate QR, and receive backend-sourced identity/class details. Security can read the registered QR list for its assigned gate but cannot create or edit QR codes.
+SMARTGATE includes college onboarding and account provisioning, student department-QR verification, late-entry requests, advisor/HOD approval, a security queue, one-time gate entry, and gate-entry history. Public registration is disabled. Approval, permission validity, and normal online entry decisions are backend-owned. Offline security verification is available after the server signing key and matching frontend public key are configured.
 
-The complete workflow is not implemented yet. Late requests, HOD/advisor approval decisions, the live approved-student queue, processing locks, time-limited permissions, entry confirmation, WebSockets, history/audit events, parent notifications, and admin UI are still future phases. Approval identity/timestamps/expiry and one-time entry status must remain backend-owned when those phases are added. The current database is SQLite; PostgreSQL deployment is also pending.
+Parent notifications and the planned complete admin analytics experience remain future work. The current database defaults to SQLite; PostgreSQL deployment is supported through `DATABASE_URL` but still requires deployment configuration.
 
 The message transport foundation is implemented: authenticated same-college direct messages are persisted, idempotent client keys make retries safe, inbox cursors recover messages after reconnect, and WebSockets push online messages with explicit delivery acknowledgement. Approval and entry workflows do not emit these messages yet because their request/permission records have not been implemented.
 
@@ -34,6 +34,24 @@ The development reload watcher is limited to `backend/app`, so installing packag
 
 The bootstrap command prompts for the first super-admin credentials and refuses to create another privileged account. Sign in as that account to create the college profile; then provision departments, HODs, advisors, gates, security accounts, and students through the admin API. After college setup, a super admin can create college-admin accounts. The API does not accept client-selected roles during registration.
 
+### Offline security verification
+
+Offline verification uses a small, gate-scoped set of currently valid approvals signed by the API. The security browser verifies the RSA signatures using a public key pinned into its frontend build. A disconnected device can confirm an entry only while the signed snapshot and permission remain within their validity windows; the default grace period is 30 minutes and `OFFLINE_GRACE_MINUTES` can be set from 1 to 60. When connectivity returns, queued entries are submitted to the API. The server accepts each event at most once, rechecks that its permission is still approved, and records accepted events as `verification_mode=offline`. Revoked, already-used, invalid, or conflicting events are rejected and retained in the sync audit log for review.
+
+Configure a dedicated RSA key pair; never reuse `JWT_SECRET` as the offline signing key. For a local setup, generate the key pair outside the repository:
+
+```powershell
+$keyDirectory = Join-Path $env:LOCALAPPDATA "SMARTGATE"
+New-Item -ItemType Directory -Force $keyDirectory | Out-Null
+$env:SMARTGATE_KEY_DIRECTORY = $keyDirectory
+$backendDirectory = Join-Path (Get-Location) "backend"
+& "$backendDirectory\.venv\Scripts\python.exe" -c "import os; from pathlib import Path; from cryptography.hazmat.primitives.asymmetric import rsa; from cryptography.hazmat.primitives import serialization; d=Path(os.environ['SMARTGATE_KEY_DIRECTORY']); k=rsa.generate_private_key(public_exponent=65537,key_size=3072); d.joinpath('offline-private.pem').write_bytes(k.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption())); d.joinpath('offline-public.pem').write_bytes(k.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))"
+```
+
+Set `OFFLINE_SIGNING_PRIVATE_KEY_FILE` in `backend/.env` to the generated private-key path. Copy `frontend/student/.env.example` to `frontend/student/.env.local` and set `VITE_OFFLINE_PUBLIC_KEY` to the matching public PEM (preserve the PEM header/footer and newlines), then rebuild/restart the frontend. The public key is not secret; the private key must be protected, backed up securely, and excluded from source control. Offline verification remains disabled if a signing key is unavailable or the frontend key pin does not match.
+
+The offline cache is stored in the security browser's local storage and is not encrypted by this web application. Use a managed, access-controlled gate device, keep it signed in before an outage, and serve the client over HTTPS in production. The app currently verifies the cached approved queue and still requires the guard to physically confirm the student's identity; it does not scan a student permission QR offline. Offline timestamps come from the device clock, so deployments that need stronger time assurance should use managed-device controls or hardware-backed time before relying on offline acceptance.
+
 ### Local demo accounts
 
 For a disposable local SQLite database only, configure unique emails and passwords in `backend/.env`, then opt in to seed a demo college with CCE, a main gate, HOD, advisor, student, security account, and active CCE gate QR. Each demo password must be at least 12 characters and different from the others:
@@ -59,6 +77,8 @@ npm run dev
 ```
 
 Open the Vite URL (normally `http://localhost:5173`). The API base defaults to `http://127.0.0.1:8000`; set `VITE_API_BASE_URL` when the API runs elsewhere. Camera scanning requires browser camera permission and a secure context (`localhost` is allowed during development).
+
+Keep the security dashboard open and signed in while the device is online so its signed permission snapshot is available before a network outage. Offline entry attempts are shown as pending until server synchronization; a rejected item requires review rather than being silently treated as an accepted server record.
 
 ## Run frontend and API on one port
 
@@ -174,3 +194,20 @@ Then open http://127.0.0.1:5173/. These are the separate development-server comm
 
 
 http://127.0.0.1:8000/
+
+
+
+
+Backend:
+
+$backend = "C:\Users\dravi\OneDrive\Desktop\late_entery\backend"
+Remove-Item Env:DATABASE_URL, Env:JWT_SECRET -ErrorAction SilentlyContinue
+& "$backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir $backend --host 127.0.0.1 --port 8000 --reload --reload-dir "$backend\app"
+
+
+
+Frontend:
+
+$frontend = "C:\Users\dravi\OneDrive\Desktop\late_entery\frontend\student"
+Remove-Item Env:VITE_API_BASE_URL -ErrorAction SilentlyContinue
+npm --prefix $frontend run dev

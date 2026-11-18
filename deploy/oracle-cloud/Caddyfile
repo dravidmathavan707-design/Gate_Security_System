@@ -1,0 +1,4 @@
+{$SMARTGATE_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy smartgate:8000
+}

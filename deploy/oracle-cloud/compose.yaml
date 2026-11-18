@@ -1,0 +1,50 @@
+services:
+  smartgate:
+    build:
+      context: ../..
+      dockerfile: deploy/oracle-cloud/Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+        VITE_OFFLINE_PUBLIC_KEY: ${VITE_OFFLINE_PUBLIC_KEY:-}
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:////data/smartgate.db
+      OFFLINE_GRACE_MINUTES: ${OFFLINE_GRACE_MINUTES:-30}
+    volumes:
+      - smartgate_data:/data
+      - smartgate_uploads:/app/backend/uploads
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  caddy:
+    image: caddy:2-alpine
+    env_file:
+      - .env
+    depends_on:
+      smartgate:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  smartgate_data:
+  smartgate_uploads:
+  caddy_data:
+  caddy_config:
